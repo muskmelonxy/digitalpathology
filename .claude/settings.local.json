@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \":*)",
+      "Bash(sqlite3 /Users/yixu/Downloads/DigitalSlideSystem/data/database.sqlite \"SELECT id, name, status, width, height, max_level, thumbnail_path FROM slides;\")",
+      "Bash(open -a \"Google Chrome\" http://localhost:3000)",
+      "Bash(open http://localhost:3000)",
+      "Bash(curl -s http://localhost:3001/api/slides)",
+      "Bash(pkill -f \"node server/index.js\")",
+      "Bash(pkill -f \"react-scripts start\")",
+      "Bash(open:*)",
+      "Bash(curl:*)",
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwidXNlcm5hbWUiOiJ0ZWFjaGVyIiwicm9sZSI6InRlYWNoZXIiLCJpYXQiOjE3NzYyMTU1MDgsImV4cCI6MTc3NjMwMTkwOH0.XwI189qanQLOfGlLEDNv5VN7H6kcu2ZJNQj5zLhOmgM\")",
+      "Read(//tmp/**)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "Bash(ls /Users/yixu/Downloads/DigitalSlideSystem/uploads/slides/*.kfb*)",
+      "Bash(node:*)",
+      "Bash(identify /Users/yixu/Downloads/DigitalSlideSystem/uploads/test_extracted_slide.jpg)",
+      "Bash(xxd -l 256 /Users/yixu/Downloads/DigitalSlideSystem/uploads/slides/0cb43249-50d8-41e6-a192-7d8ef063d859.kfb)",
+      "Bash(sqlite3:*)",
+      "Bash(git --version)",
+      "Bash(gh --version)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git rm:*)",
+      "Bash(git commit -m \"Initial commit: Digital Slide Preview System:*)"
+    ]
+  }
+}
