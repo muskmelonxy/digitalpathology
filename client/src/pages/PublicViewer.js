@@ -1,19 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { useQuery } from 'react-query';
+import { Link, useParams } from 'react-router-dom';
 import axios from 'axios';
-import { useAuth } from '../contexts/AuthContext';
-import {
-  ArrowLeft,
-  ZoomIn,
-  ZoomOut,
-  RotateCcw,
-  Info,
-  Share2,
-  Maximize,
-  Minimize
-} from 'lucide-react';
-import ShareModal from '../components/ShareModal';
+import OpenSeadragon from 'openseadragon';
+import { ZoomIn, ZoomOut, RotateCcw, Info, Maximize, Minimize } from 'lucide-react';
 import OverviewMap from '../components/OverviewMap';
 import ZoomControls from '../components/ZoomControls';
 import ColorAdjust, { defaultColor, applyColorToViewer } from '../components/ColorAdjust';
@@ -28,60 +17,50 @@ import {
   zoomForMagnification,
   MAG_PRESETS
 } from '../lib/osdConfig';
-import OpenSeadragon from 'openseadragon';
 
-export default function SlideViewer() {
-  const { id } = useParams();
+// Public read-only slide viewer, opened via a share link (/s/:token).
+// No authentication required — tile + thumbnail assets are served statically.
+export default function PublicViewer() {
+  const { token } = useParams();
   const viewerRef = useRef(null);
   const osdRef = useRef(null);
+  const [slide, setSlide] = useState(null);
+  const [error, setError] = useState(null);
   const [showInfo, setShowInfo] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [, setCurrentZoom] = useState(1);
   const homeZoomRef = useRef(null);
   const [multiple, setMultiple] = useState(1);
-  const [shareOpen, setShareOpen] = useState(false);
   const [overviewOk, setOverviewOk] = useState(false);
   const [color, setColor] = useState(defaultColor);
   const colorRef = useRef(defaultColor);
   const [osdReady, setOsdReady] = useState(false);
-  const { user } = useAuth();
 
-  const { data: slide, isLoading: slideLoading } = useQuery(
-    ['slide', id],
-    () => axios.get(`/api/slides/${id}`).then(res => res.data),
-    {
-      enabled: !!id,
-      refetchInterval: (data) => {
-        if (!data) return 2000;
-        if (data.status === 'processing') return 2000;
-        if (data.status === 'ready' && Number(data.pyramid_complete) === 0) return 5000;
-        return false;
-      }
-    }
-  );
-
-  const { data: slideInfo, isLoading: infoLoading } = useQuery(
-    ['slideInfo', id],
-    () => axios.get(`/api/slides/${id}/info`).then(res => res.data),
-    { enabled: !!id && slide?.status === 'ready' }
-  );
-
-  // Prefetch overview for CSS first-paint only — do NOT rebuild OpenSeadragon when it arrives.
   useEffect(() => {
-    if (!id) return;
+    axios.get(`/api/share/public/${token}`)
+      .then(res => setSlide(res.data))
+      .catch(err => {
+        setError(err.response?.data?.error || '无法加载分享的切片');
+      });
+  }, [token]);
+
+  // Prefetch crisp whole-slide overview for first paint; fall back to thumbnail.
+  useEffect(() => {
+    if (!slide) return;
     setOverviewOk(false);
     const img = new Image();
     img.onload = () => setOverviewOk(true);
     img.onerror = () => setOverviewOk(false);
-    img.src = `/uploads/overviews/${id}.jpg`;
-  }, [id]);
+    img.src = `/uploads/overviews/${slide.id}.jpg`;
+  }, [slide]);
 
-  const placeholderSrc = overviewOk
-    ? `/uploads/overviews/${id}.jpg`
+  const placeholderSrc = slide && overviewOk
+    ? `/uploads/overviews/${slide.id}.jpg`
     : (slide?.thumbnail_path);
 
   useEffect(() => {
-    if (!slideInfo || !viewerRef.current) return;
+    if (!slide) return;
+    if (!viewerRef.current) return;
 
     if (osdRef.current) {
       osdRef.current.destroy();
@@ -89,20 +68,16 @@ export default function SlideViewer() {
     }
 
     const tileSource = buildTileSource({
-      id,
-      width: slideInfo.width,
-      height: slideInfo.height,
-      tileSize: slideInfo.tileSize,
-      maxLevel: slideInfo.maxLevel,
-      tilesVersion: slideInfo.tilesVersion || 1
+      id: slide.id,
+      width: slide.width,
+      height: slide.height,
+      tileSize: slide.tile_size,
+      maxLevel: slide.max_level,
+      tilesVersion: slide.tiles_version || 1
     });
 
     osdRef.current = OpenSeadragon(buildOsdOptions(viewerRef.current));
     osdRef.current.open(tileSource);
-
-    osdRef.current.addHandler('tile-load-failed', (event) => {
-      console.warn('Tile load failed:', event?.tile?.url || event);
-    });
 
     osdRef.current.addHandler('zoom', () => {
       const z = osdRef.current.viewport.getZoom();
@@ -115,6 +90,7 @@ export default function SlideViewer() {
       const hz = osdRef.current.viewport.getZoom();
       homeZoomRef.current = hz;
       setCurrentZoom(hz);
+      setMultiple(1);
       applyColorToViewer(osdRef.current, colorRef.current);
       const usedHash = applyViewportHash(osdRef.current);
       unbindHash = bindViewportHash(osdRef.current);
@@ -134,9 +110,7 @@ export default function SlideViewer() {
         osdRef.current = null;
       }
     };
-    // Intentionally omit overviewOk / slide / token — rebuilding OSD on overview
-    // load was resetting the viewport and refetching every tile.
-  }, [slideInfo, id]);
+  }, [slide]);
 
   // Apply color adjustments live (brightness/contrast/gamma/grayscale/invert)
   useEffect(() => {
@@ -144,23 +118,13 @@ export default function SlideViewer() {
     applyColorToViewer(osdRef.current, color);
   }, [color]);
 
-  const handleZoomIn = () => {
-    osdRef.current?.viewport.zoomBy(1.5);
-  };
-
-  const handleZoomOut = () => {
-    osdRef.current?.viewport.zoomBy(0.667);
-  };
-
-  const handleReset = () => {
-    osdRef.current?.viewport.goHome();
-  };
-
+  const handleZoomIn = () => osdRef.current?.viewport.zoomBy(1.5);
+  const handleZoomOut = () => osdRef.current?.viewport.zoomBy(0.667);
+  const handleReset = () => osdRef.current?.viewport.goHome();
   const handleSetMultiple = (m) => {
     if (!osdRef.current) return;
     osdRef.current.viewport.zoomTo(zoomForMagnification(osdRef.current, m));
   };
-
   const handleFullscreen = () => {
     if (!document.fullscreenElement) {
       viewerRef.current?.requestFullscreen();
@@ -171,109 +135,60 @@ export default function SlideViewer() {
     }
   };
 
-  if (slideLoading) {
+  if (error) {
     return (
-      <div className="flex items-center justify-center h-[calc(100vh-200px)]">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full text-center">
+          <h1 className="text-2xl font-bold text-gray-900 mb-3">分享链接无效</h1>
+          <p className="text-gray-600 mb-6">{error}</p>
+          <Link to="/login" className="btn-secondary inline-flex items-center justify-center">返回登录</Link>
+        </div>
       </div>
     );
   }
 
   if (!slide) {
     return (
-      <div className="text-center py-16">
-        <h2 className="text-xl font-medium text-gray-900">Slide not found</h2>
-        <Link to="/slides" className="btn-primary inline-block mt-4">
-          Back to Slides
-        </Link>
-      </div>
-    );
-  }
-
-  if (slide.status === 'error') {
-    return (
-      <div className="text-center py-16 max-w-lg mx-auto">
-        <h2 className="text-xl font-medium text-gray-900">Processing failed</h2>
-        <p className="text-gray-600 mt-2 whitespace-pre-wrap">{slide.error_message || slide.processing_message || 'This slide could not be converted.'}</p>
-        <Link to="/slides" className="btn-primary inline-block mt-4">
-          Back to Slides
-        </Link>
-      </div>
-    );
-  }
-
-  if (slide.status !== 'ready') {
-    const pct = Number(slide.processing_progress) || 0;
-    return (
-      <div className="text-center py-16 max-w-lg mx-auto">
-        <h2 className="text-xl font-medium text-gray-900">Preparing slide</h2>
-        <p className="text-gray-600 mt-2">{slide.processing_message || 'Building deep-zoom tiles…'}</p>
-        <div className="mt-6 h-2 bg-gray-200 rounded-full overflow-hidden">
-          <div className="h-full bg-blue-600 transition-all" style={{ width: `${pct}%` }} />
-        </div>
-        <p className="text-sm text-gray-500 mt-2">{pct}%</p>
-        <p className="text-xs text-gray-400 mt-4">The viewer opens as soon as the overview is ready. Higher zoom loads tiles on demand.</p>
-        <Link to="/slides" className="btn-secondary inline-block mt-4">
-          Back to Slides
-        </Link>
-      </div>
-    );
-  }
-
-  if (infoLoading || !slideInfo) {
-    return (
-      <div className="flex items-center justify-center h-[calc(100vh-200px)]">
+      <div className="flex items-center justify-center h-screen">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="h-[calc(100vh-85px)] flex flex-col">
+    <div className="min-h-screen bg-gray-100">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-4">
-          <Link to="/slides" className="p-2 hover:bg-gray-100 rounded-lg">
-            <ArrowLeft className="w-5 h-5" />
-          </Link>
-          <div>
-            <h1 className="text-xl font-bold text-gray-900">{slide.name}</h1>
-            <p className="text-sm text-gray-500">{slide.course_name}</p>
-          </div>
+      <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3 min-w-0">
+          <h1 className="text-lg font-bold text-gray-900 truncate">{slide.name}</h1>
+          {slide.course_name && (
+            <span className="text-sm text-gray-500 flex-shrink-0">{slide.course_name}</span>
+          )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-shrink-0">
           <div className="relative">
             <ColorAdjust value={color} onChange={setColor} />
           </div>
-          {user?.role !== 'student' && (
-            <button
-              onClick={() => setShareOpen(true)}
-              className="p-2 rounded-lg hover:bg-gray-100 text-gray-700"
-              title="分享切片"
-            >
-              <Share2 className="w-5 h-5" />
-            </button>
-          )}
           <button
             onClick={() => setShowInfo(!showInfo)}
-            className={`p-2 rounded-lg transition-colors ${showInfo ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-100'}`}
+            className={`p-2 rounded-lg transition-colors ${showInfo ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-100 text-gray-600'}`}
+            title="切片信息"
           >
             <Info className="w-5 h-5" />
           </button>
         </div>
       </div>
 
-      {/* Main Viewer Area */}
-      <div className="flex-1 flex gap-4 overflow-hidden">
-        {/* Viewer */}
+      {/* Viewer area */}
+      <div className="h-[calc(100vh-57px)] flex gap-4 p-4 overflow-hidden">
         <div className="flex-1 relative bg-gray-900 rounded-lg overflow-hidden">
           <div ref={viewerRef} className="w-full h-full" style={placeholderStyle(placeholderSrc)} />
 
           <OverviewMap
             overviewSrc={placeholderSrc}
-            labelSrc={(slide.has_label || slideInfo?.has_label) ? `/uploads/labels/${id}.jpg` : null}
-            width={slideInfo.width}
-            height={slideInfo.height}
+            labelSrc={slide.has_label ? `/uploads/labels/${slide.id}.jpg` : null}
+            width={slide.width}
+            height={slide.height}
             viewerRef={osdRef}
             osdReady={osdReady}
             presets={MAG_PRESETS}
@@ -281,31 +196,7 @@ export default function SlideViewer() {
             onSetMagnification={handleSetMultiple}
           />
 
-          {Number(slide.pyramid_complete) === 0 && (
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-amber-100/95 text-amber-900 text-xs font-medium px-3 py-1.5 rounded-full shadow">
-              Higher magnification still generating…
-            </div>
-          )}
-
-          {/* Controls Overlay */}
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-white/90 backdrop-blur rounded-lg shadow-lg p-2">
-            <button onClick={handleZoomOut} className="p-2 hover:bg-gray-100 rounded" title="Zoom Out">
-              <ZoomOut className="w-5 h-5" />
-            </button>
-            <span className="text-sm font-medium min-w-[60px] text-center">
-              {multiple >= 10 ? `${Math.round(multiple)}×` : `${Number(multiple).toFixed(1)}×`}
-            </span>
-            <button onClick={handleZoomIn} className="p-2 hover:bg-gray-100 rounded" title="Zoom In">
-              <ZoomIn className="w-5 h-5" />
-            </button>
-            <div className="w-px h-6 bg-gray-300 mx-1" />
-            <button onClick={handleReset} className="p-2 hover:bg-gray-100 rounded" title="Reset View">
-              <RotateCcw className="w-5 h-5" />
-            </button>
-            <button onClick={handleFullscreen} className="p-2 hover:bg-gray-100 rounded" title="Fullscreen">
-              {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
-            </button>
-          </div>
+          <ScaleBar viewerRef={osdRef} microPerPx={slide.micro_per_px} osdReady={osdReady} />
 
           {/* Zoom slider + magnification presets (bottom-left) */}
           <ZoomControls
@@ -316,16 +207,29 @@ export default function SlideViewer() {
             onHome={handleReset}
           />
 
-          {/* µm 尺标 (bottom-right) */}
-          <ScaleBar viewerRef={osdRef} microPerPx={slide.micro_per_px} osdReady={osdReady} />
-
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-white/90 backdrop-blur rounded-lg shadow-lg p-2">
+            <button onClick={handleZoomOut} className="p-2 hover:bg-gray-100 rounded" title="缩小">
+              <ZoomOut className="w-5 h-5" />
+            </button>
+            <span className="text-sm font-medium min-w-[60px] text-center">
+              {multiple >= 10 ? `${Math.round(multiple)}×` : `${Number(multiple).toFixed(1)}×`}
+            </span>
+            <button onClick={handleZoomIn} className="p-2 hover:bg-gray-100 rounded" title="放大">
+              <ZoomIn className="w-5 h-5" />
+            </button>
+            <div className="w-px h-6 bg-gray-300 mx-1" />
+            <button onClick={handleReset} className="p-2 hover:bg-gray-100 rounded" title="复位">
+              <RotateCcw className="w-5 h-5" />
+            </button>
+            <button onClick={handleFullscreen} className="p-2 hover:bg-gray-100 rounded" title="全屏">
+              {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
+            </button>
+          </div>
         </div>
 
-        {/* Info Sidebar */}
         {showInfo && (
-          <div className="w-80 bg-white rounded-lg shadow p-6 overflow-y-auto">
-            <h3 className="font-semibold text-gray-900 mb-4">Slide Information</h3>
-
+          <div className="w-80 bg-white rounded-lg shadow p-6 overflow-y-auto flex-shrink-0">
+            <h3 className="font-semibold text-gray-900 mb-4">切片信息</h3>
             <div className="space-y-4">
               <div>
                 <label className="text-sm text-gray-500">名称</label>
@@ -339,7 +243,6 @@ export default function SlideViewer() {
                 </div>
               )}
 
-              {/* Clinical Information */}
               {(slide.gender || slide.age || slide.diagnosis || slide.other_info || slide.case_no || slide.sampling_site || slide.institution || slide.microscopic || slide.ihc) && (
                 <div className="border-t pt-4">
                   <h4 className="font-medium text-gray-900 mb-3">病例信息</h4>
@@ -402,49 +305,27 @@ export default function SlideViewer() {
                 </div>
               )}
 
-              <div>
-                <label className="text-sm text-gray-500">课程</label>
-                <p className="text-sm font-medium text-gray-900">{slide.course_name || '未分配'}</p>
-              </div>
-
               <div className="border-t pt-4">
                 <h4 className="font-medium text-gray-900 mb-3">技术参数</h4>
-
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
-                    <label className="text-gray-500">Dimensions</label>
-                    <p className="font-medium">{slide.width.toLocaleString()} × {slide.height.toLocaleString()} px</p>
+                    <label className="text-gray-500">尺寸</label>
+                    <p className="font-medium">{slide.width.toLocaleString()} × {slide.height.toLocaleString()}</p>
                   </div>
                   <div>
-                    <label className="text-gray-500">Format</label>
+                    <label className="text-gray-500">格式</label>
                     <p className="font-medium uppercase">{slide.original_format}</p>
-                  </div>
-                  <div>
-                    <label className="text-gray-500">Tile Size</label>
-                    <p className="font-medium">{slide.tile_size} px</p>
-                  </div>
-                  <div>
-                    <label className="text-gray-500">Zoom Levels</label>
-                    <p className="font-medium">{slide.max_level + 1}</p>
                   </div>
                 </div>
               </div>
 
-              <div className="border-t pt-4">
-                <label className="text-sm text-gray-500">Uploaded</label>
-                <p className="text-sm text-gray-900">
-                  {new Date(slide.created_at).toLocaleDateString()} by {slide.uploaded_by_name}
-                </p>
+              <div className="border-t pt-4 text-xs text-gray-400">
+                由 {slide.uploaded_by_name} 分享
               </div>
             </div>
           </div>
         )}
       </div>
-
-      {/* Share Modal */}
-      {shareOpen && (
-        <ShareModal slideId={slide.id} onClose={() => setShareOpen(false)} />
-      )}
     </div>
   );
 }

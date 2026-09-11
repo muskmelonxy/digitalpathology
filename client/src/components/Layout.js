@@ -43,7 +43,7 @@ export default function Layout() {
       {/* Sidebar - Desktop */}
       <aside className="hidden md:flex flex-col w-64 bg-white border-r border-gray-200">
         <div className="p-6 border-b border-gray-200">
-          <h1 className="text-xl font-bold text-gray-900">Digital Slide System</h1>
+          <h1 className="text-xl font-bold text-gray-900">数字切片库</h1>
         </div>
 
         <nav className="flex-1 p-4 space-y-1">
@@ -90,7 +90,7 @@ export default function Layout() {
       {/* Mobile Header */}
       <div className="md:hidden fixed top-0 left-0 right-0 bg-white border-b border-gray-200 z-50">
         <div className="flex items-center justify-between p-4">
-          <h1 className="text-lg font-bold text-gray-900">Digital Slide System</h1>
+          <h1 className="text-lg font-bold text-gray-900">数字切片库</h1>
           <button
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg"

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { query, get, run } = require('../database');
 const { authenticateToken, requireRole } = require('../middleware/auth');
+const { slideAssetFlags } = require('../utils/slideAssets');
 
 // Get all slides (with access control)
 router.get('/', authenticateToken, async (req, res) => {
@@ -63,7 +64,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
       }
     }
 
-    res.json(slide);
+    res.json({ ...slide, ...slideAssetFlags(slide.id) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -98,17 +99,22 @@ router.get('/:id/info', authenticateToken, async (req, res) => {
       height: slide.height,
       tileSize: slide.tile_size,
       maxLevel: slide.max_level,
-      format: 'jpg'
+      tilesVersion: slide.tiles_version || 1,
+      pyramidComplete: slide.pyramid_complete !== 0,
+      format: 'jpg',
+      ...slideAssetFlags(slide.id),
+      thumbnailPath: slide.thumbnail_path,
+      microPerPx: slide.micro_per_px
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Update slide
+// Update slide (including clinical info)
 router.put('/:id', authenticateToken, requireRole('teacher', 'admin'), async (req, res) => {
   try {
-    const { name, description, course_id } = req.body;
+    const { name, description, course_id, gender, age, diagnosis, other_info, case_no, sampling_site, institution, microscopic, ihc } = req.body;
 
     const slide = await get('SELECT * FROM slides WHERE id = ?', [req.params.id]);
     if (!slide) {
@@ -121,8 +127,8 @@ router.put('/:id', authenticateToken, requireRole('teacher', 'admin'), async (re
     }
 
     await run(
-      'UPDATE slides SET name = ?, description = ?, course_id = ? WHERE id = ?',
-      [name, description, course_id || null, req.params.id]
+      'UPDATE slides SET name = ?, description = ?, course_id = ?, gender = ?, age = ?, diagnosis = ?, other_info = ?, case_no = ?, sampling_site = ?, institution = ?, microscopic = ?, ihc = ? WHERE id = ?',
+      [name, description, course_id || null, gender || '', age || '', diagnosis || '', other_info || '', case_no || '', sampling_site || '', institution || '', microscopic || '', ihc || '', req.params.id]
     );
 
     const updated = await get('SELECT * FROM slides WHERE id = ?', [req.params.id]);

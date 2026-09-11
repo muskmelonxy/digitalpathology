@@ -5,11 +5,17 @@ client/node_modules/
 # Uploads and data (user content)
 uploads/slides/*
 uploads/tiles/*
+uploads/overviews/*
+!uploads/overviews/.gitkeep
 uploads/temp/*
 uploads/thumbnails/*
+uploads/labels/*
+uploads/macros/*
 !uploads/slides/.gitkeep
 !uploads/tiles/.gitkeep
 !uploads/thumbnails/.gitkeep
+!uploads/labels/.gitkeep
+!uploads/macros/.gitkeep
 data/*.sqlite
 
 # Logs
@@ -45,3 +51,4 @@ Thumbs.db
 
 # Test files
 uploads/test_*
+__pycache__/

@@ -11,6 +11,7 @@ import Courses from './pages/Courses';
 import CourseDetail from './pages/CourseDetail';
 import Upload from './pages/Upload';
 import Students from './pages/Students';
+import PublicViewer from './pages/PublicViewer';
 
 function PrivateRoute({ children, requireTeacher = false }) {
   const { user, loading } = useAuth();
@@ -39,6 +40,8 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      {/* Public share link — no login required */}
+      <Route path="/s/:token" element={<PublicViewer />} />
       <Route
         path="/"
         element={

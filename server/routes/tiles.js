@@ -45,6 +45,8 @@ router.get('/:slideId/:level/:col/:row.jpg', authenticateToken, async (req, res)
       return res.status(404).json({ error: 'Tile not found' });
     }
 
+    res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    res.setHeader('Content-Type', 'image/jpeg');
     res.sendFile(tilePath);
   } catch (error) {
     console.error('Error serving tile:', error);

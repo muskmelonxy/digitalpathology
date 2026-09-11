@@ -1,8 +1,10 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs');
 const bcrypt = require('bcryptjs');
 
 const DB_PATH = path.join(__dirname, '../data/database.sqlite');
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 let db = null;
 
@@ -71,6 +73,7 @@ function initDatabase() {
           thumbnail_path TEXT,
           course_id INTEGER,
           uploaded_by INTEGER NOT NULL,
+          share_token TEXT,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (course_id) REFERENCES courses(id),
           FOREIGN KEY (uploaded_by) REFERENCES users(id)
@@ -84,10 +87,60 @@ function initDatabase() {
         // Create default teacher account
         try {
           await createDefaultUser();
-          resolve();
         } catch (e) {
-          resolve(); // Continue even if default user exists
+          // Continue even if default user exists
         }
+
+        // ---- Migration: add share_token column to slides (for pre-existing DBs) ----
+        try {
+          const cols = await query(`PRAGMA table_info(slides)`);
+          if (!cols.some(c => c.name === 'share_token')) {
+            await run(`ALTER TABLE slides ADD COLUMN share_token TEXT`);
+            console.log('Migration: added share_token column to slides');
+          }
+        } catch (e) {
+          console.error('Migration failed (share_token):', e.message);
+        }
+
+        // ---- Migration: add enriched case/metadata columns (病理号/取材部位/机构/镜下所见/免疫组化) ----
+        const caseColumns = {
+          case_no: 'TEXT',        // 病理号
+          sampling_site: 'TEXT',  // 取材部位
+          institution: 'TEXT',    // 医疗机构
+          microscopic: 'TEXT',    // 镜下所见
+          ihc: 'TEXT',            // 免疫组化
+          micro_per_px: 'REAL',   // 微米/像素 (kfb CapRes, 用于尺标/倍率)
+          gender: 'TEXT',
+          age: 'TEXT',
+          diagnosis: 'TEXT',
+          other_info: 'TEXT',
+          processing_progress: 'INTEGER DEFAULT 0',
+          processing_message: 'TEXT',
+          error_message: 'TEXT',
+          tiles_version: 'INTEGER DEFAULT 1',
+          pyramid_complete: 'INTEGER DEFAULT 0'
+        };
+        try {
+          const cols = await query(`PRAGMA table_info(slides)`);
+          const hadPyramidCol = cols.some(c => c.name === 'pyramid_complete');
+          for (const [name, type] of Object.entries(caseColumns)) {
+            if (!cols.some(c => c.name === name)) {
+              await run(`ALTER TABLE slides ADD COLUMN ${name} ${type}`);
+              console.log(`Migration: added ${name} column to slides`);
+            }
+          }
+          // One-shot: slides that were already ready before this column existed
+          // already have a full pyramid on disk. Do not rerun on later boots —
+          // that would mark an in-flight coarse-first pyramid as complete.
+          if (!hadPyramidCol) {
+            await run(`UPDATE slides SET pyramid_complete = 1 WHERE status = 'ready'`);
+            console.log('Migration: marked existing ready slides pyramid_complete=1');
+          }
+        } catch (e) {
+          console.error('Migration failed (case columns):', e.message);
+        }
+
+        resolve();
       });
     });
   });

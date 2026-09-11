@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
-const SUPPORTED_FORMATS = ['.tiff', '.tif', '.jpg', '.jpeg', '.png', '.kfb', '.kfbio'];
+const SUPPORTED_FORMATS = ['.tiff', '.tif', '.jpg', '.jpeg', '.png', '.kfb', '.kfbio', '.svs'];
 const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
 
 export default function Upload() {
@@ -32,6 +32,10 @@ export default function Upload() {
       name: file.name.replace(/\.[^/.]+$/, ''),
       description: '',
       course_id: '',
+      gender: '',
+      age: '',
+      diagnosis: '',
+      other_info: '',
       progress: 0,
       status: 'pending', // pending, uploading, processing, done, error
       error: null,
@@ -43,7 +47,7 @@ export default function Upload() {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'image/*': ['.tiff', '.tif', '.jpg', '.jpeg', '.png'],
+      'image/*': ['.tiff', '.tif', '.jpg', '.jpeg', '.png', '.svs'],
       'application/octet-stream': ['.kfb', '.kfbio']
     },
     maxSize: MAX_FILE_SIZE,
@@ -62,11 +66,20 @@ export default function Upload() {
     setFiles(prev => prev.map((f, i) => i === index ? { ...f, ...updates } : f));
   };
 
+  // Update clinical info for a specific pending file
+  const updateClinical = (index, field, value) => {
+    setFiles(prev => prev.map((f, i) => i === index ? { ...f, [field]: value } : f));
+  };
+
   const uploadFile = async (fileObj, index) => {
     const formData = new FormData();
     formData.append('slide', fileObj.file);
     formData.append('name', fileObj.name);
     formData.append('description', fileObj.description);
+    formData.append('gender', fileObj.gender);
+    formData.append('age', fileObj.age);
+    formData.append('diagnosis', fileObj.diagnosis);
+    formData.append('other_info', fileObj.other_info);
     if (fileObj.course_id) {
       formData.append('course_id', fileObj.course_id);
     }
@@ -105,15 +118,29 @@ export default function Upload() {
     const checkStatus = async () => {
       try {
         const response = await axios.get(`/api/upload/status/${slideId}`);
-        const { status } = response.data;
+        const { status, processing_progress, processing_message, error_message, pyramid_complete } = response.data;
 
-        if (status === 'ready') {
-          updateFile(index, { status: 'done' });
+        if (status === 'ready' && Number(pyramid_complete) !== 0) {
+          updateFile(index, { status: 'done', progress: 100, processMessage: 'Ready' });
           queryClient.invalidateQueries('slides');
+        } else if (status === 'ready') {
+          updateFile(index, {
+            status: 'processing',
+            progress: Math.max(Number(processing_progress) || 55, 55),
+            processMessage: processing_message || 'Preview ready — finishing high-res tiles…'
+          });
+          setTimeout(checkStatus, 2000);
         } else if (status === 'error') {
-          updateFile(index, { status: 'error', error: 'Processing failed' });
+          updateFile(index, {
+            status: 'error',
+            error: error_message || processing_message || 'Processing failed'
+          });
         } else {
-          // Still processing, poll again
+          updateFile(index, {
+            status: 'processing',
+            progress: Number(processing_progress) || 0,
+            processMessage: processing_message || 'Processing tiles…'
+          });
           setTimeout(checkStatus, 2000);
         }
       } catch (error) {
@@ -161,12 +188,12 @@ export default function Upload() {
     }
   };
 
-  const getStatusText = (status) => {
-    switch (status) {
+  const getStatusText = (fileObj) => {
+    switch (fileObj.status) {
       case 'uploading':
         return 'Uploading...';
       case 'processing':
-        return 'Processing tiles...';
+        return fileObj.processMessage || 'Processing tiles...';
       case 'done':
         return 'Complete';
       case 'error':
@@ -185,7 +212,7 @@ export default function Upload() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Upload Slides</h1>
           <p className="text-gray-600 mt-1">
-            Upload TIFF, JPEG, PNG, or KFBIO files
+            Upload TIFF, JPEG, PNG, SVS or KFB (.kfb / .kfbio). KFB uses the native decoder — no manual convert step.
           </p>
         </div>
         {doneCount > 0 && (
@@ -214,7 +241,7 @@ export default function Upload() {
         </p>
         <p className="text-gray-500 mt-2">or click to browse</p>
         <p className="text-sm text-gray-400 mt-4">
-          Supported: TIFF, JPEG, PNG, KFBIO (max 5GB)
+          Supported: TIFF, JPEG, PNG, SVS, KFB/KFBIO (max 5GB). KFB is decoded natively.
         </p>
       </div>
 
@@ -270,31 +297,81 @@ export default function Upload() {
                     </p>
 
                     {fileObj.status === 'pending' && (
-                      <div className="flex gap-3 mt-3">
-                        <input
-                          type="text"
-                          value={fileObj.description}
-                          onChange={(e) => updateFile(index, { description: e.target.value })}
-                          placeholder="Description (optional)"
-                          className="input text-sm flex-1"
-                        />
-                        <select
-                          value={fileObj.course_id}
-                          onChange={(e) => updateFile(index, { course_id: e.target.value })}
-                          className="input text-sm w-48"
-                        >
-                          <option value="">No Course</option>
-                          {courses?.map(course => (
-                            <option key={course.id} value={course.id}>{course.name}</option>
-                          ))}
-                        </select>
-                      </div>
+                      <>
+                        <div className="flex gap-3 mt-3">
+                          <input
+                            type="text"
+                            value={fileObj.description}
+                            onChange={(e) => updateFile(index, { description: e.target.value })}
+                            placeholder="Description (optional)"
+                            className="input text-sm flex-1"
+                          />
+                          <select
+                            value={fileObj.course_id}
+                            onChange={(e) => updateFile(index, { course_id: e.target.value })}
+                            className="input text-sm w-48"
+                          >
+                            <option value="">No Course</option>
+                            {courses?.map(course => (
+                              <option key={course.id} value={course.id}>{course.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        {/* Clinical Information Fields */}
+                        <div className="mt-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                          <p className="text-sm font-medium text-gray-700 mb-2">临床信息</p>
+                          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                            <div>
+                              <label className="block text-xs text-gray-500 mb-1">性别</label>
+                              <select
+                                value={fileObj.gender}
+                                onChange={(e) => updateClinical(index, 'gender', e.target.value)}
+                                className="input text-sm"
+                              >
+                                <option value="">--</option>
+                                <option value="男">男</option>
+                                <option value="女">女</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-xs text-gray-500 mb-1">年龄</label>
+                              <input
+                                type="text"
+                                value={fileObj.age}
+                                onChange={(e) => updateClinical(index, 'age', e.target.value)}
+                                placeholder="e.g. 45"
+                                className="input text-sm"
+                              />
+                            </div>
+                            <div className="sm:col-span-2">
+                              <label className="block text-xs text-gray-500 mb-1">诊断</label>
+                              <input
+                                type="text"
+                                value={fileObj.diagnosis}
+                                onChange={(e) => updateClinical(index, 'diagnosis', e.target.value)}
+                                placeholder="e.g. 肺腺癌"
+                                className="input text-sm w-full"
+                              />
+                            </div>
+                            <div className="sm:col-span-4">
+                              <label className="block text-xs text-gray-500 mb-1">其他信息</label>
+                              <input
+                                type="text"
+                                value={fileObj.other_info}
+                                onChange={(e) => updateClinical(index, 'other_info', e.target.value)}
+                                placeholder="e.g. 手术日期: 2024-01, 病理号: P2024-001"
+                                className="input text-sm w-full"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </>
                     )}
 
                     {(fileObj.status === 'uploading' || fileObj.status === 'processing') && (
                       <div className="mt-3">
                         <div className="flex items-center justify-between text-sm mb-1">
-                          <span>{getStatusText(fileObj.status)}</span>
+                          <span>{getStatusText(fileObj)}</span>
                           <span>{fileObj.progress}%</span>
                         </div>
                         <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
