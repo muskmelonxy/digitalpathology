@@ -160,12 +160,15 @@ def _free_buf(lib, buf):
 
 
 def fetch_tile(lib, info, fscale, x, y, width=TILE, height=TILE):
-    """Decode a ROI. x/y are tile-grid indices at the requested scale.
+    """Decode a ROI via GetImageDataRoiFunc.
 
-    IMPORTANT: this vendor library returns broken ROIs for many fscale < 1
-    values (whole-slide thumbnail stamped into the corner). Prefer fscale=1.0
-    with a larger width/height, then downscale with Pillow when building
-    coarse pyramid levels.
+    Coordinate space scales with fscale relative to header `scale` (e.g. 40x):
+    at fscale=header_scale, x/y/width/height are full-resolution pixels.
+    at fscale=1.0, the addressable plane is only ~W/scale × H/scale (soft).
+
+    fscale < 1 often returns broken corner-stamped thumbs — avoid it.
+    Native 256px tiles MUST use fscale=header_scale with pixel coords
+    (col*256, row*256), NOT fscale=1.0 with tile indices.
     """
     buf = ctypes.c_void_p(); ln = ctypes.c_int()
     r = lib.GetImageDataRoiFunc(ctypes.byref(info), ctypes.c_float(fscale),
@@ -178,6 +181,21 @@ def fetch_tile(lib, info, fscale, x, y, width=TILE, height=TILE):
     finally:
         _free_buf(lib, buf.value)
 
+
+
+def fetch_native_tile(lib, info, col, row, scan_scale, blank_jpeg=None):
+    """Full-resolution 256px tile.
+
+    Uses fscale=scan_scale (header scale, typically 40) with full-res pixel
+    coordinates. fscale=1.0 + tile indices only addresses ~W/scale and looks soft.
+    """
+    fs = float(scan_scale) if scan_scale and float(scan_scale) > 0 else 1.0
+    # When header scale is missing/1, fall back to fscale=1 tile-index mode.
+    if fs <= 1.0:
+        jpg = fetch_tile(lib, info, 1.0, col, row, TILE, TILE)
+    else:
+        jpg = fetch_tile(lib, info, fs, int(col) * TILE, int(row) * TILE, TILE, TILE)
+    return jpg or blank_jpeg
 
 def _jpeg_to_tile(jpeg_bytes, blank_jpeg):
     """Resize/pad arbitrary JPEG bytes to TILE x TILE JPEG."""
@@ -200,14 +218,102 @@ def _jpeg_to_tile(jpeg_bytes, blank_jpeg):
 
 
 
-def fetch_pyramid_tile(lib, info, level, col, row, cmax, full_w, full_h, blank_jpeg, _cache=None, overview_path=None):
-    """Full-res decode at max level; coarser levels crop+resize the overview JPEG.
+def _overview_covers_level(ow, oh, full_w, full_h, cmax, level):
+    """Overview is sharp enough when it has >= the level-plane pixel size.
+    Threshold: ow >= ceil(full_w / 2^(cmax-level)) (and same for height).
+    """
+    d = 2 ** (cmax - level)
+    need_w = max(1, math.ceil(full_w / d))
+    need_h = max(1, math.ceil(full_h / d))
+    return ow >= need_w and oh >= need_h
 
-    Fractional fscale ROIs from this vendor library are unreliable. Building
-    coarse levels by mosaicking thousands of native tiles is too slow/heavy.
-    Using the associated overview for all non-max levels keeps geometry correct
-    (continuous pan/zoom) and reserves GetImageDataRoiFunc(fscale=1) for native
-    magnification tiles only.
+
+def _assemble_downscale_tile(lib, info, level, col, row, cmax, full_w, full_h, blank_jpeg, _cache, scan_scale=40):
+    """Build a mid-level tile from a grid of native fscale=1.0 256px tiles.
+
+    Avoids huge single ROIs (OOM) and broken fscale<1 vendor thumbs.
+    """
+    from io import BytesIO
+    from PIL import Image
+    d = 2 ** (cmax - level)
+    x0 = col * TILE * d
+    y0 = row * TILE * d
+    x1 = min(full_w, x0 + TILE * d)
+    y1 = min(full_h, y0 + TILE * d)
+    region_w = max(1, x1 - x0)
+    region_h = max(1, y1 - y0)
+    nc0 = x0 // TILE
+    nr0 = y0 // TILE
+    nc1 = math.ceil(x1 / TILE)
+    nr1 = math.ceil(y1 / TILE)
+    native_cols = max(1, math.ceil(full_w / TILE))
+    native_rows = max(1, math.ceil(full_h / TILE))
+
+    cell = TILE // d if d and TILE % d == 0 else 0
+    if cell >= 1:
+        mosaic_w = (nc1 - nc0) * cell
+        mosaic_h = (nr1 - nr0) * cell
+        mosaic = Image.new('RGB', (mosaic_w, mosaic_h), (255, 255, 255))
+        for nr in range(nr0, nr1):
+            for nc in range(nc0, nc1):
+                if nc < 0 or nr < 0 or nc >= native_cols or nr >= native_rows:
+                    continue
+                nkey = (cmax, nc, nr, 'native')
+                if nkey in _cache:
+                    jpg = _cache[nkey]
+                else:
+                    jpg = fetch_native_tile(lib, info, nc, nr, scan_scale, blank_jpeg)
+                    _cache[nkey] = jpg
+                try:
+                    im = Image.open(BytesIO(jpg)).convert('RGB').resize((cell, cell), Image.LANCZOS)
+                except Exception:
+                    im = Image.new('RGB', (cell, cell), (255, 255, 255))
+                mosaic.paste(im, ((nc - nc0) * cell, (nr - nr0) * cell))
+        el = max(0, min(int((x0 - nc0 * TILE) / d), mosaic_w - 1))
+        et = max(0, min(int((y0 - nr0 * TILE) / d), mosaic_h - 1))
+        ew = max(1, min(math.ceil(region_w / d), mosaic_w - el))
+        eh = max(1, min(math.ceil(region_h / d), mosaic_h - et))
+        tile = mosaic.crop((el, et, el + ew, et + eh)).resize((TILE, TILE), Image.LANCZOS)
+        buf = BytesIO()
+        tile.save(buf, format='JPEG', quality=85)
+        return buf.getvalue()
+
+    # Fallback: strip assemble at full res then downscale
+    mosaic_w = (nc1 - nc0) * TILE
+    mosaic_h = (nr1 - nr0) * TILE
+    mosaic = Image.new('RGB', (mosaic_w, mosaic_h), (255, 255, 255))
+    for nr in range(nr0, nr1):
+        for nc in range(nc0, nc1):
+            if nc < 0 or nr < 0 or nc >= native_cols or nr >= native_rows:
+                continue
+            nkey = (cmax, nc, nr, 'native')
+            if nkey in _cache:
+                jpg = _cache[nkey]
+            else:
+                jpg = fetch_native_tile(lib, info, nc, nr, scan_scale, blank_jpeg)
+                _cache[nkey] = jpg
+            try:
+                im = Image.open(BytesIO(jpg)).convert('RGB')
+                if im.size != (TILE, TILE):
+                    im = im.resize((TILE, TILE), Image.LANCZOS)
+            except Exception:
+                im = Image.new('RGB', (TILE, TILE), (255, 255, 255))
+            mosaic.paste(im, ((nc - nc0) * TILE, (nr - nr0) * TILE))
+    el = max(0, min(x0 - nc0 * TILE, mosaic_w - 1))
+    et = max(0, min(y0 - nr0 * TILE, mosaic_h - 1))
+    ew = max(1, min(region_w, mosaic_w - el))
+    eh = max(1, min(region_h, mosaic_h - et))
+    tile = mosaic.crop((el, et, el + ew, et + eh)).resize((TILE, TILE), Image.LANCZOS)
+    buf = BytesIO()
+    tile.save(buf, format='JPEG', quality=85)
+    return buf.getvalue()
+
+
+def fetch_pyramid_tile(lib, info, level, col, row, cmax, full_w, full_h, blank_jpeg, _cache=None, overview_path=None, scan_scale=40):
+    """Native max level via fscale=scan_scale + pixel coords; overview when sharp enough.
+
+    Mid levels that fail the overview threshold are assembled from a grid of
+    native 256px tiles and lanczos-downscaled (no fscale<1, no huge ROI).
     """
     if _cache is None:
         _cache = {}
@@ -224,38 +330,45 @@ def fetch_pyramid_tile(lib, info, level, col, row, cmax, full_w, full_h, blank_j
 
     # Native full-resolution tiles
     if d <= 1:
-        jpg = fetch_tile(lib, info, 1.0, col, row, TILE, TILE) or blank_jpeg
+        jpg = fetch_native_tile(lib, info, col, row, scan_scale, blank_jpeg)
         _cache[key] = jpg
         return jpg
 
-    # Coarse: crop from overview/macro/thumbnail
+    # Overview crop only when overview has enough pixels for this level plane
     src = overview_path
-    if not src or not os.path.exists(src):
-        _cache[key] = blank_jpeg
-        return blank_jpeg
+    if src and os.path.exists(src):
+        try:
+            from io import BytesIO
+            from PIL import Image
+            im = Image.open(src).convert('RGB')
+            ow, oh = im.size
+            if _overview_covers_level(ow, oh, full_w, full_h, cmax, level):
+                lw = max(1, math.ceil(full_w / d))
+                lh = max(1, math.ceil(full_h / d))
+                left = int(col * TILE * ow / lw)
+                top = int(row * TILE * oh / lh)
+                right = int(min(lw, (col + 1) * TILE) * ow / lw)
+                bottom = int(min(lh, (row + 1) * TILE) * oh / lh)
+                left = max(0, min(left, ow - 1))
+                top = max(0, min(top, oh - 1))
+                right = max(left + 1, min(right, ow))
+                bottom = max(top + 1, min(bottom, oh))
+                tile = im.crop((left, top, right, bottom)).resize((TILE, TILE), Image.BILINEAR)
+                buf = BytesIO()
+                tile.save(buf, format='JPEG', quality=85)
+                out = buf.getvalue()
+                _cache[key] = out
+                return out
+        except Exception as e:
+            emit({'event': 'warn', 'msg': f'overview crop L{level} {col},{row}: {e}'})
+
+    # Mid level: assemble native tiles + downscale
     try:
-        from io import BytesIO
-        from PIL import Image
-        im = Image.open(src).convert('RGB')
-        ow, oh = im.size
-        lw = max(1, math.ceil(full_w / d))
-        lh = max(1, math.ceil(full_h / d))
-        left = int(col * TILE * ow / lw)
-        top = int(row * TILE * oh / lh)
-        right = int(min(lw, (col + 1) * TILE) * ow / lw)
-        bottom = int(min(lh, (row + 1) * TILE) * oh / lh)
-        left = max(0, min(left, ow - 1))
-        top = max(0, min(top, oh - 1))
-        right = max(left + 1, min(right, ow))
-        bottom = max(top + 1, min(bottom, oh))
-        tile = im.crop((left, top, right, bottom)).resize((TILE, TILE), Image.BILINEAR)
-        buf = BytesIO()
-        tile.save(buf, format='JPEG', quality=85)
-        out = buf.getvalue()
+        out = _assemble_downscale_tile(lib, info, level, col, row, cmax, full_w, full_h, blank_jpeg, _cache, scan_scale=scan_scale)
         _cache[key] = out
         return out
     except Exception as e:
-        emit({'event': 'warn', 'msg': f'overview crop L{level} {col},{row}: {e}'})
+        emit({'event': 'warn', 'msg': f'assemble L{level} {col},{row}: {e}'})
         _cache[key] = blank_jpeg
         return blank_jpeg
 
@@ -549,7 +662,7 @@ def serve_loop(args):
         'uploads': getattr(args, 'uploads', None),
         'tid': getattr(args, 'tid', None),
         'path': None,
-        'W': 0, 'H': 0, 'cmax': 0, 'cap_res': 0,
+        'W': 0, 'H': 0, 'cmax': 0, 'cap_res': 0, 'scan_scale': 40,
     }
 
     def close_current():
@@ -566,13 +679,14 @@ def serve_loop(args):
         info = ImageInfoStruct()
         if lib.InitImageFileFunc(ctypes.byref(info), kfb_path.encode()) != 1:
             raise RuntimeError('InitImageFileFunc failed: ' + kfb_path)
-        W, H, _bs, cap_res, _scan = header(lib, info)
+        W, H, _bs, cap_res, scan = header(lib, info)
         state['info'] = info
         state['path'] = kfb_path
         state['W'] = W
         state['H'] = H
         state['cmax'] = calc_max_level(W, H)
         state['cap_res'] = cap_res
+        state['scan_scale'] = scan if scan and scan > 0 else 40
         return W, H, state['cmax'], cap_res
 
     emit({'event': 'ready', 'mode': 'serve'})
@@ -616,6 +730,7 @@ def serve_loop(args):
                     lib, state['info'], lv, col, row, cmax,
                     state['W'], state['H'], blank_jpeg,
                     overview_path=overview,
+                    scan_scale=state.get('scan_scale', 40),
                 ) or blank_jpeg
                 os.makedirs(os.path.dirname(out), exist_ok=True)
                 with open(out, 'wb') as f:

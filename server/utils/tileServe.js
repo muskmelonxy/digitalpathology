@@ -2,6 +2,19 @@
  * On-demand 256px JPEG tiles. Cache hits are served from disk with a 7-day
  * Cache-Control; misses are generated from the original WSI (Sharp extract or
  * the persistent KFB worker) and then cached.
+ *
+ * KFB zoom strategy
+ * -----------------
+ * Vendor GetImageDataRoiFunc with fscale<1 returns broken corner-stamped
+ * thumbs. True native tiles use fscale=header_scale (e.g. 40) with full-res
+ * pixel coords (col*256,row*256) via the KFB worker — NOT fscale=1.0 tile
+ * indices (that only addresses ~W/scale and looks soft).
+ *
+ * Overview crops are ONLY used when the overview has enough resolution for
+ * that level — i.e. overviewWidth >= ceil(slideWidth / 2^(maxLevel-level))
+ * (and same for height). For slide 22 (32450×24648, overview 1600×1214,
+ * maxLevel 7) that means levels 0–2 only. Mid levels assemble a grid of
+ * native 256 tiles, then lanczos3-downscale to 256 (no huge ROI).
  */
 const path = require('path');
 const fs = require('fs-extra');
@@ -13,6 +26,7 @@ const TILES_ROOT = path.join(__dirname, '../../uploads/tiles');
 const SLIDES_ROOT = path.join(__dirname, '../../uploads/slides');
 const TILE_RE = /^\/(\d+)\/(\d+)\/(\d+)_(\d+)\.jpe?g$/i;
 const SHARP_CONCURRENCY = Math.max(1, Number(process.env.TILE_GEN_CONCURRENCY || 4));
+const NATIVE_FETCH_CONCURRENCY = Math.max(1, Number(process.env.KFB_NATIVE_FETCH_CONCURRENCY || 6));
 
 const inflight = new Map();
 const slideCache = new Map();
@@ -38,6 +52,20 @@ function withSharpLimit(fn) {
   });
 }
 
+async function mapPool(items, concurrency, worker) {
+  const out = new Array(items.length);
+  let i = 0;
+  const runners = Array.from({ length: Math.min(concurrency, Math.max(1, items.length)) }, async () => {
+    while (true) {
+      const idx = i++;
+      if (idx >= items.length) return;
+      out[idx] = await worker(items[idx], idx);
+    }
+  });
+  await Promise.all(runners);
+  return out;
+}
+
 async function loadSlide(id) {
   const hit = slideCache.get(id);
   if (hit && Date.now() - hit.t < 8000) return hit.row;
@@ -60,41 +88,72 @@ function sourcePathFor(slide) {
   return path.join(SLIDES_ROOT, slide.filename);
 }
 
-
-
 /**
- * Pre-generate all non-native zoom levels for a KFB slide by cropping the
- * WSI overview/thumbnail. This removes first-pan latency at low/mid zoom.
- * Native maxLevel tiles stay on-demand (vendor decode).
+ * True when overview has >= the level plane resolution, so a crop is not a
+ * soft digital zoom of a low-res thumb.
+ * Threshold: ow >= ceil(width / 2^(maxLevel-level)) && oh >= ceil(height / …).
  */
-async function prebuildKfbCoarseLevels(slideId, width, height, maxLevel, tileSize = 256) {
+function overviewCoversLevel(ow, oh, width, height, maxLevel, level) {
+  const d = 2 ** (maxLevel - level);
+  const needW = Math.max(1, Math.ceil(width / d));
+  const needH = Math.max(1, Math.ceil(height / d));
+  return ow >= needW && oh >= needH;
+}
+
+/** Highest level (inclusive) that may use overview crops; -1 if none. */
+function maxOverviewSafeLevel(ow, oh, width, height, maxLevel) {
+  let best = -1;
+  for (let level = 0; level < maxLevel; level++) {
+    if (overviewCoversLevel(ow, oh, width, height, maxLevel, level)) best = level;
+    else break;
+  }
+  return best;
+}
+
+async function resolveOverviewPath(slideId) {
   const sharp = require('sharp');
   const candidates = [
     path.join(__dirname, '../../uploads/overviews', `${slideId}.jpg`),
     path.join(__dirname, '../../uploads/thumbnails', `${slideId}.jpg`)
   ];
   let overview = null;
-  let best = -1;
+  let bestPixels = -1;
+  let meta = null;
   for (const c of candidates) {
     if (!(await fs.pathExists(c))) continue;
     try {
       const m = await sharp(c).metadata();
       const px = (m.width || 0) * (m.height || 0);
-      if (px > best) { best = px; overview = c; }
+      if (px > bestPixels) {
+        bestPixels = px;
+        overview = c;
+        meta = m;
+      }
     } catch (e) {
       if (!overview) overview = c;
     }
   }
+  return { overview, meta };
+}
+
+/**
+ * Pre-generate overview-safe coarse levels only (fast disk cache for far zoom).
+ * Mid levels are NOT built from the overview — that looked like soft digital zoom.
+ * Optionally schedules a background full-res prebuild for the next 1–2 mid levels.
+ */
+async function prebuildKfbCoarseLevels(slideId, width, height, maxLevel, tileSize = 256) {
+  const sharp = require('sharp');
+  const { overview, meta } = await resolveOverviewPath(slideId);
   if (!overview) throw new Error(`no overview for slide ${slideId}`);
 
-  const ov = sharp(overview);
-  const meta = await ov.metadata();
-  const ow = meta.width || 1;
-  const oh = meta.height || 1;
+  const ow = (meta && meta.width) || (await sharp(overview).metadata()).width || 1;
+  const oh = (meta && meta.height) || (await sharp(overview).metadata()).height || 1;
+  const safeMax = maxOverviewSafeLevel(ow, oh, width, height, maxLevel);
   let n = 0;
   const t0 = Date.now();
 
-  for (let level = 0; level < maxLevel; level++) {
+  // Documented threshold: only levels where overview covers the level plane.
+  for (let level = 0; level <= safeMax; level++) {
     const d = 2 ** (maxLevel - level);
     const levelWidth = Math.max(1, Math.ceil(width / d));
     const levelHeight = Math.max(1, Math.ceil(height / d));
@@ -136,28 +195,61 @@ async function prebuildKfbCoarseLevels(slideId, width, height, maxLevel, tileSiz
     }
     await flush();
   }
-  return { tiles: n, ms: Date.now() - t0, overview };
+
+  // Optional background: next 1–2 mid levels from full-res (set PREBUILD_KFB_MID=1).
+  // Off by default — full mid prebuild can decode thousands of native tiles.
+  if (String(process.env.PREBUILD_KFB_MID || '') === '1' && safeMax + 1 < maxLevel) {
+    const midLevels = [];
+    for (let lv = safeMax + 1; lv < maxLevel && midLevels.length < 2; lv++) midLevels.push(lv);
+    setImmediate(() => {
+      prebuildKfbMidLevelsFromFullRes(slideId, width, height, maxLevel, midLevels, tileSize)
+        .then((r) => console.log(`[kfb] mid prebuild slide ${slideId} L[${midLevels.join(',')}]: ${r.tiles} tiles in ${r.ms}ms`))
+        .catch((e) => console.error(`[kfb] mid prebuild failed slide ${slideId}:`, e.message));
+    });
+  }
+
+  return { tiles: n, ms: Date.now() - t0, overview, overviewSafeMax: safeMax, overviewSize: `${ow}x${oh}` };
+}
+
+/**
+ * Prebuild selected mid levels by assembling native tiles + downscale.
+ * Skips tiles that already exist. Intended for background use.
+ */
+async function prebuildKfbMidLevelsFromFullRes(slideId, width, height, maxLevel, levels, tileSize = 256) {
+  const slide = await loadSlide(slideId);
+  if (!slide) throw new Error(`slide ${slideId} missing`);
+  const src = sourcePathFor(slide);
+  let n = 0;
+  const t0 = Date.now();
+  for (const level of levels) {
+    if (level < 0 || level >= maxLevel) continue;
+    const d = 2 ** (maxLevel - level);
+    const levelWidth = Math.max(1, Math.ceil(width / d));
+    const levelHeight = Math.max(1, Math.ceil(height / d));
+    const cols = Math.max(1, Math.ceil(levelWidth / tileSize));
+    const rows = Math.max(1, Math.ceil(levelHeight / tileSize));
+    await fs.ensureDir(path.join(TILES_ROOT, String(slideId), String(level)));
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const dest = tilePath(slideId, level, col, row);
+        if (await fs.pathExists(dest)) { n += 1; continue; }
+        try {
+          await withSharpLimit(() => generateKfbDownscaleTile({
+            slideId, src, level, col, row, tileSize, maxLevel, width, height, dest
+          }));
+          n += 1;
+        } catch (e) {
+          console.error(`[kfb] mid tile ${slideId}/${level}/${col}_${row}:`, e.message);
+        }
+      }
+    }
+  }
+  return { tiles: n, ms: Date.now() - t0, levels };
 }
 
 async function generateKfbOverviewTile({ slideId, level, col, row, tileSize, maxLevel, width, height, dest }) {
   const sharp = require('sharp');
-  const candidates = [
-    path.join(__dirname, '../../uploads/overviews', `${slideId}.jpg`),
-    path.join(__dirname, '../../uploads/thumbnails', `${slideId}.jpg`)
-  ];
-  // Use WSI overview/thumbnail only — cassette macros have a different coordinate frame.
-  let overview = null;
-  let bestPixels = -1;
-  for (const c of candidates) {
-    if (!(await fs.pathExists(c))) continue;
-    try {
-      const m = await sharp(c).metadata();
-      const px = (m.width || 0) * (m.height || 0);
-      if (px > bestPixels) { bestPixels = px; overview = c; }
-    } catch (e) {
-      if (!overview) overview = c;
-    }
-  }
+  const { overview, meta } = await resolveOverviewPath(slideId);
   if (!overview) {
     const err = new Error('kfb overview missing');
     err.status = 404;
@@ -166,9 +258,13 @@ async function generateKfbOverviewTile({ slideId, level, col, row, tileSize, max
   const d = 2 ** (maxLevel - level);
   const levelWidth = Math.max(1, Math.ceil(width / d));
   const levelHeight = Math.max(1, Math.ceil(height / d));
-  const meta = await sharp(overview).metadata();
-  const ow = meta.width || 1;
-  const oh = meta.height || 1;
+  const ow = (meta && meta.width) || (await sharp(overview).metadata()).width || 1;
+  const oh = (meta && meta.height) || (await sharp(overview).metadata()).height || 1;
+  if (!overviewCoversLevel(ow, oh, width, height, maxLevel, level)) {
+    const err = new Error(`overview too small for level ${level} (${ow}x${oh})`);
+    err.status = 500;
+    throw err;
+  }
   const left = Math.floor((col * tileSize * ow) / levelWidth);
   const top = Math.floor((row * tileSize * oh) / levelHeight);
   const right = Math.ceil((Math.min(levelWidth, (col + 1) * tileSize) * ow) / levelWidth);
@@ -185,6 +281,149 @@ async function generateKfbOverviewTile({ slideId, level, col, row, tileSize, max
     .jpeg({ quality: 85 })
     .toFile(tmp);
   await fs.move(tmp, dest, { overwrite: true });
+  return dest;
+}
+
+/**
+ * Sharp mid-level tile: mosaic native 256px tiles, then lanczos3
+ * downscale to 256. Prefers per-native downscale-then-composite when
+ * tileSize/d is an integer (>=1) so we never decode one huge ROI.
+ */
+async function generateKfbDownscaleTile({ slideId, src, level, col, row, tileSize, maxLevel, width, height, dest }) {
+  const sharp = require('sharp');
+  const d = 2 ** (maxLevel - level);
+  if (d <= 1) {
+    await fs.ensureDir(path.dirname(dest));
+    await extractKfbTile(src, maxLevel, col, row, dest);
+    return dest;
+  }
+
+  const x0 = col * tileSize * d;
+  const y0 = row * tileSize * d;
+  const x1 = Math.min(width, x0 + tileSize * d);
+  const y1 = Math.min(height, y0 + tileSize * d);
+  const regionW = Math.max(1, x1 - x0);
+  const regionH = Math.max(1, y1 - y0);
+
+  const nc0 = Math.floor(x0 / tileSize);
+  const nr0 = Math.floor(y0 / tileSize);
+  const nc1 = Math.ceil(x1 / tileSize);
+  const nr1 = Math.ceil(y1 / tileSize);
+
+  const nativeMaxCol = Math.max(1, Math.ceil(width / tileSize));
+  const nativeMaxRow = Math.max(1, Math.ceil(height / tileSize));
+
+  const cells = [];
+  for (let nr = nr0; nr < nr1; nr++) {
+    for (let nc = nc0; nc < nc1; nc++) {
+      if (nc < 0 || nr < 0 || nc >= nativeMaxCol || nr >= nativeMaxRow) continue;
+      cells.push({ nc, nr });
+    }
+  }
+  if (cells.length === 0) {
+    const err = new Error('no native tiles for region');
+    err.status = 404;
+    throw err;
+  }
+
+  await mapPool(cells, NATIVE_FETCH_CONCURRENCY, async ({ nc, nr }) => {
+    const p = tilePath(slideId, maxLevel, nc, nr);
+    if (await fs.pathExists(p)) return;
+    await fs.ensureDir(path.dirname(p));
+    const tmp = `${p}.tmp.jpg`;
+    await extractKfbTile(src, maxLevel, nc, nr, tmp);
+    await fs.move(tmp, p, { overwrite: true });
+  });
+
+  await fs.ensureDir(path.dirname(dest));
+  const tmpOut = `${dest}.tmp.jpg`;
+  const cell = tileSize / d;
+
+  if (Number.isInteger(cell) && cell >= 1) {
+    // Downscale each native tile first, then composite — keeps memory small.
+    const mosaicW = (nc1 - nc0) * cell;
+    const mosaicH = (nr1 - nr0) * cell;
+    const composites = await mapPool(cells, NATIVE_FETCH_CONCURRENCY, async ({ nc, nr }) => {
+      const buf = await sharp(tilePath(slideId, maxLevel, nc, nr))
+        .resize(cell, cell, { fit: 'fill', kernel: sharp.kernel.lanczos3 })
+        .jpeg({ quality: 95 })
+        .toBuffer();
+      return {
+        input: buf,
+        left: (nc - nc0) * cell,
+        top: (nr - nr0) * cell
+      };
+    });
+
+    const extractLeft = Math.max(0, Math.min(Math.floor((x0 - nc0 * tileSize) / d), mosaicW - 1));
+    const extractTop = Math.max(0, Math.min(Math.floor((y0 - nr0 * tileSize) / d), mosaicH - 1));
+    const extractWidth = Math.max(1, Math.min(Math.ceil(regionW / d), mosaicW - extractLeft));
+    const extractHeight = Math.max(1, Math.min(Math.ceil(regionH / d), mosaicH - extractTop));
+
+    let pipeline = sharp({
+      create: {
+        width: mosaicW,
+        height: mosaicH,
+        channels: 3,
+        background: { r: 255, g: 255, b: 255 }
+      }
+    }).composite(composites);
+
+    if (extractWidth !== mosaicW || extractHeight !== mosaicH || extractLeft || extractTop) {
+      pipeline = pipeline.extract({
+        left: extractLeft,
+        top: extractTop,
+        width: extractWidth,
+        height: extractHeight
+      });
+    }
+
+    await pipeline
+      .resize(tileSize, tileSize, { fit: 'fill', kernel: sharp.kernel.lanczos3 })
+      .jpeg({ quality: 85 })
+      .toFile(tmpOut);
+  } else {
+    // Fallback: full-res mosaic in row strips (avoid one giant ROI / OOM).
+    const mosaicW = (nc1 - nc0) * tileSize;
+    const stripHeight = tileSize;
+    const stripBufs = [];
+    for (let nr = nr0; nr < nr1; nr++) {
+      const rowInputs = [];
+      for (let nc = nc0; nc < nc1; nc++) {
+        if (nc < 0 || nr < 0 || nc >= nativeMaxCol || nr >= nativeMaxRow) continue;
+        rowInputs.push({
+          input: tilePath(slideId, maxLevel, nc, nr),
+          left: (nc - nc0) * tileSize,
+          top: 0
+        });
+      }
+      const strip = await sharp({
+        create: {
+          width: mosaicW,
+          height: stripHeight,
+          channels: 3,
+          background: { r: 255, g: 255, b: 255 }
+        }
+      })
+        .composite(rowInputs)
+        .raw()
+        .toBuffer();
+      stripBufs.push(strip);
+    }
+    const mosaicH = stripBufs.length * stripHeight;
+    const mosaic = Buffer.concat(stripBufs);
+    const extractLeft = Math.max(0, Math.min(x0 - nc0 * tileSize, mosaicW - 1));
+    const extractTop = Math.max(0, Math.min(y0 - nr0 * tileSize, mosaicH - 1));
+    const extractWidth = Math.max(1, Math.min(regionW, mosaicW - extractLeft));
+    const extractHeight = Math.max(1, Math.min(regionH, mosaicH - extractTop));
+    await sharp(mosaic, { raw: { width: mosaicW, height: mosaicH, channels: 3 } })
+      .extract({ left: extractLeft, top: extractTop, width: extractWidth, height: extractHeight })
+      .resize(tileSize, tileSize, { fit: 'fill', kernel: sharp.kernel.lanczos3 })
+      .jpeg({ quality: 85 })
+      .toFile(tmpOut);
+  }
+
+  await fs.move(tmpOut, dest, { overwrite: true });
   return dest;
 }
 
@@ -229,22 +468,41 @@ async function ensureTile(slideId, level, col, row) {
 
     if (isKfb(slide)) {
       const lv = Number(level);
-      // Coarse levels: crop associated overview (vendor fscale<1 ROIs are broken).
-      // Native level: decode 256px tiles at fscale=1.0 via the KFB worker.
-      if (lv < maxLevel) {
-        await withSharpLimit(() => generateKfbOverviewTile({
-          slideId,
-          level: lv,
-          col,
-          row,
-          tileSize,
-          maxLevel,
-          width,
-          height,
-          dest
-        }));
+      if (lv >= maxLevel) {
+        // Native full-res: worker uses fscale=scan_scale + pixel coords.
+        await extractKfbTile(src, maxLevel, col, row, dest);
       } else {
-        await extractKfbTile(src, lv, col, row, dest);
+        const { overview, meta: ovMeta } = await resolveOverviewPath(slideId);
+        const ow = ovMeta && ovMeta.width;
+        const oh = ovMeta && ovMeta.height;
+        const canOverview = overview && ow && oh && overviewCoversLevel(ow, oh, width, height, maxLevel, lv);
+        if (canOverview) {
+          await withSharpLimit(() => generateKfbOverviewTile({
+            slideId,
+            level: lv,
+            col,
+            row,
+            tileSize,
+            maxLevel,
+            width,
+            height,
+            dest
+          }));
+        } else {
+          // Mid zoom: assemble native tiles + lanczos3 downscale (sharp).
+          await withSharpLimit(() => generateKfbDownscaleTile({
+            slideId,
+            src,
+            level: lv,
+            col,
+            row,
+            tileSize,
+            maxLevel,
+            width,
+            height,
+            dest
+          }));
+        }
       }
     } else {
       await withSharpLimit(() => generateOneTile(src, dest, {
@@ -309,4 +567,14 @@ async function tileMiddleware(req, res, next) {
   }
 }
 
-module.exports = { tileMiddleware, ensureTile, tilePath, prebuildKfbCoarseLevels, generateKfbOverviewTile };
+module.exports = {
+  tileMiddleware,
+  ensureTile,
+  tilePath,
+  prebuildKfbCoarseLevels,
+  prebuildKfbMidLevelsFromFullRes,
+  generateKfbOverviewTile,
+  generateKfbDownscaleTile,
+  overviewCoversLevel,
+  maxOverviewSafeLevel
+};

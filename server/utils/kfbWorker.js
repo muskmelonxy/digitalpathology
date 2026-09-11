@@ -100,7 +100,9 @@ class KfbSession {
   request(msg) {
     if (this.dead) return Promise.reject(new Error('kfb worker dead'));
     this.lastUsed = Date.now();
-    return new Promise((resolve, reject) => {
+    // Serialize stdin writes: concurrent callers must not interleave JSON lines.
+    const run = () => new Promise((resolve, reject) => {
+      if (this.dead) return reject(new Error('kfb worker dead'));
       const id = this.nextId++;
       const payload = { ...msg, id };
       const timer = setTimeout(() => {
@@ -116,6 +118,10 @@ class KfbSession {
         reject(e);
       }
     });
+    const prev = this._writeChain || Promise.resolve();
+    const job = prev.then(run, run);
+    this._writeChain = job.catch(() => {});
+    return job;
   }
 
   async tile(level, col, row, outPath) {
