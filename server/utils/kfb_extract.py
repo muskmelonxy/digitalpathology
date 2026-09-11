@@ -159,10 +159,17 @@ def _free_buf(lib, buf):
         pass
 
 
-def fetch_tile(lib, info, fscale, x, y):
+def fetch_tile(lib, info, fscale, x, y, width=TILE, height=TILE):
+    """Decode a ROI. x/y are tile-grid indices at the requested scale.
+
+    IMPORTANT: this vendor library returns broken ROIs for many fscale < 1
+    values (whole-slide thumbnail stamped into the corner). Prefer fscale=1.0
+    with a larger width/height, then downscale with Pillow when building
+    coarse pyramid levels.
+    """
     buf = ctypes.c_void_p(); ln = ctypes.c_int()
     r = lib.GetImageDataRoiFunc(ctypes.byref(info), ctypes.c_float(fscale),
-                                int(x), int(y), TILE, TILE, ctypes.byref(buf),
+                                int(x), int(y), int(width), int(height), ctypes.byref(buf),
                                 ctypes.byref(ln), True)
     if r != 1 or ln.value <= 0 or not buf.value:
         return None
@@ -170,6 +177,88 @@ def fetch_tile(lib, info, fscale, x, y):
         return ctypes.string_at(buf, ln.value)
     finally:
         _free_buf(lib, buf.value)
+
+
+def _jpeg_to_tile(jpeg_bytes, blank_jpeg):
+    """Resize/pad arbitrary JPEG bytes to TILE x TILE JPEG."""
+    if not jpeg_bytes:
+        return blank_jpeg
+    try:
+        from io import BytesIO
+        from PIL import Image
+        im = Image.open(BytesIO(jpeg_bytes)).convert('RGB')
+        if im.size != (TILE, TILE):
+            im = im.resize((TILE, TILE), Image.BILINEAR)
+        out = BytesIO()
+        im.save(out, format='JPEG', quality=85)
+        return out.getvalue()
+    except Exception:
+        # Pillow optional at runtime; fall back to original bytes
+        return jpeg_bytes
+
+
+
+
+
+def fetch_pyramid_tile(lib, info, level, col, row, cmax, full_w, full_h, blank_jpeg, _cache=None, overview_path=None):
+    """Full-res decode at max level; coarser levels crop+resize the overview JPEG.
+
+    Fractional fscale ROIs from this vendor library are unreliable. Building
+    coarse levels by mosaicking thousands of native tiles is too slow/heavy.
+    Using the associated overview for all non-max levels keeps geometry correct
+    (continuous pan/zoom) and reserves GetImageDataRoiFunc(fscale=1) for native
+    magnification tiles only.
+    """
+    if _cache is None:
+        _cache = {}
+    key = (level, col, row, overview_path or '')
+    if key in _cache:
+        return _cache[key]
+
+    d = 2 ** (cmax - level)
+    level_cols = max(1, math.ceil(full_w / (TILE * d)))
+    level_rows = max(1, math.ceil(full_h / (TILE * d)))
+    if col < 0 or row < 0 or col >= level_cols or row >= level_rows:
+        _cache[key] = blank_jpeg
+        return blank_jpeg
+
+    # Native full-resolution tiles
+    if d <= 1:
+        jpg = fetch_tile(lib, info, 1.0, col, row, TILE, TILE) or blank_jpeg
+        _cache[key] = jpg
+        return jpg
+
+    # Coarse: crop from overview/macro/thumbnail
+    src = overview_path
+    if not src or not os.path.exists(src):
+        _cache[key] = blank_jpeg
+        return blank_jpeg
+    try:
+        from io import BytesIO
+        from PIL import Image
+        im = Image.open(src).convert('RGB')
+        ow, oh = im.size
+        lw = max(1, math.ceil(full_w / d))
+        lh = max(1, math.ceil(full_h / d))
+        left = int(col * TILE * ow / lw)
+        top = int(row * TILE * oh / lh)
+        right = int(min(lw, (col + 1) * TILE) * ow / lw)
+        bottom = int(min(lh, (row + 1) * TILE) * oh / lh)
+        left = max(0, min(left, ow - 1))
+        top = max(0, min(top, oh - 1))
+        right = max(left + 1, min(right, ow))
+        bottom = max(top + 1, min(bottom, oh))
+        tile = im.crop((left, top, right, bottom)).resize((TILE, TILE), Image.BILINEAR)
+        buf = BytesIO()
+        tile.save(buf, format='JPEG', quality=85)
+        out = buf.getvalue()
+        _cache[key] = out
+        return out
+    except Exception as e:
+        emit({'event': 'warn', 'msg': f'overview crop L{level} {col},{row}: {e}'})
+        _cache[key] = blank_jpeg
+        return blank_jpeg
+
 
 
 def fetch_assoc(lib, info, kind):
@@ -242,9 +331,9 @@ def extract_level(lib, info, base, lv, cmax, cw, ch, blank_jpeg, crop=None, boxC
     for r in range(rn):
         for c in range(cn):
             if fs >= 0.999 and crop is not None:
-                jpg = fetch_tile(lib, info, 1.0, boxC + c, boxR + r)
+                jpg = fetch_pyramid_tile(lib, info, lv, boxC + c, boxR + r, cmax, cw, ch, blank_jpeg)
             else:
-                jpg = fetch_tile(lib, info, fs, c, r)
+                jpg = fetch_pyramid_tile(lib, info, lv, c, r, cmax, cw, ch, blank_jpeg)
             if not jpg:
                 jpg = blank_jpeg
             with open(os.path.join(dd, f'{c}_{r}.jpg'), 'wb') as f:
@@ -329,7 +418,52 @@ def run_preview(lib, info, args, W, H, cap_res, blank_jpeg):
     assoc = dump_assoc(lib, info, args.uploads, tid)
 
     emit({'event': 'progress', 'pct': 20, 'msg': 'Extracting overview tiles…', 'viewable': False})
-    n, cn, rn = extract_level(lib, info, base, 0, cmax, cw, ch, blank_jpeg)
+    # Level 0 from associated overview/thumbnail — avoids OOM and broken fscale<1 ROIs.
+    overview_src = None
+    for cand in (
+        os.path.join(args.uploads, 'overviews', f'{tid}.jpg') if args.uploads else None,
+        os.path.join(args.uploads, 'thumbnails', f'{tid}.jpg') if args.uploads else None,
+        os.path.join(args.uploads, 'macros', f'{tid}.jpg') if args.uploads else None,
+    ):
+        if cand and os.path.exists(cand):
+            overview_src = cand
+            break
+    dd = os.path.join(base, '0')
+    os.makedirs(dd, exist_ok=True)
+    cn = math.ceil(cw / (TILE * (2 ** cmax)))
+    rn = math.ceil(ch / (TILE * (2 ** cmax)))
+    cn, rn = max(1, cn), max(1, rn)
+    n = 0
+    if overview_src and cn == 1 and rn == 1:
+        try:
+            from io import BytesIO
+            from PIL import Image
+            im = Image.open(overview_src).convert('RGB').resize((TILE, TILE), Image.BILINEAR)
+            buf = BytesIO(); im.save(buf, format='JPEG', quality=85)
+            open(os.path.join(dd, '0_0.jpg'), 'wb').write(buf.getvalue())
+            n = 1
+        except Exception as e:
+            emit({'event': 'warn', 'msg': f'overview level0 failed: {e}'})
+            open(os.path.join(dd, '0_0.jpg'), 'wb').write(blank_jpeg); n = 1
+    else:
+        # sparse compose via capped pyramid fetch
+        cache = {}
+        for r in range(rn):
+            for c in range(cn):
+                jpg = fetch_pyramid_tile(lib, info, 0, c, r, cmax, cw, ch, blank_jpeg, cache)
+                open(os.path.join(dd, f'{c}_{r}.jpg'), 'wb').write(jpg or blank_jpeg)
+                n += 1
+    # ensure overview file exists for navigator
+    if args.uploads and overview_src:
+        ov = os.path.join(args.uploads, 'overviews', f'{tid}.jpg')
+        if overview_src != ov:
+            try:
+                os.makedirs(os.path.dirname(ov), exist_ok=True)
+                if not os.path.exists(ov):
+                    shutil.copy2(overview_src, ov)
+            except Exception:
+                pass
+
 
     # Prefer WSI thumbnail as the overview JPEG (navigator), not the cassette photo.
     if args.uploads:
@@ -412,6 +546,8 @@ def serve_loop(args):
     lib = load_lib(args.dll)
     state = {
         'info': None,
+        'uploads': getattr(args, 'uploads', None),
+        'tid': getattr(args, 'tid', None),
         'path': None,
         'W': 0, 'H': 0, 'cmax': 0, 'cap_res': 0,
     }
@@ -467,9 +603,20 @@ def serve_loop(args):
                 row = int(msg['row'])
                 out = msg['out']
                 cmax = state['cmax']
-                d = 2 ** (cmax - lv)
-                fs = 1.0 / d
-                jpg = fetch_tile(lib, state['info'], fs, col, row) or blank_jpeg
+                overview = None
+                uploads = state.get('uploads')
+                tid = state.get('tid')
+                if uploads and tid is not None:
+                    for name in ('overviews', 'thumbnails', 'macros'):
+                        cand = os.path.join(uploads, name, f'{tid}.jpg')
+                        if os.path.exists(cand):
+                            overview = cand
+                            break
+                jpg = fetch_pyramid_tile(
+                    lib, state['info'], lv, col, row, cmax,
+                    state['W'], state['H'], blank_jpeg,
+                    overview_path=overview,
+                ) or blank_jpeg
                 os.makedirs(os.path.dirname(out), exist_ok=True)
                 with open(out, 'wb') as f:
                     f.write(jpg)

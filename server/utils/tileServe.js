@@ -52,11 +52,62 @@ function tilePath(slideId, level, col, row) {
 
 function isKfb(slide) {
   const f = String(slide.original_format || '').toLowerCase();
-  return f === 'kfb' || f === 'kfbio';
+  const name = String(slide.filename || '').toLowerCase();
+  return f === 'kfb' || f === 'kfbio' || name.endsWith('.kfb') || name.endsWith('.kfbio');
 }
 
 function sourcePathFor(slide) {
   return path.join(SLIDES_ROOT, slide.filename);
+}
+
+
+async function generateKfbOverviewTile({ slideId, level, col, row, tileSize, maxLevel, width, height, dest }) {
+  const sharp = require('sharp');
+  const candidates = [
+    path.join(__dirname, '../../uploads/overviews', `${slideId}.jpg`),
+    path.join(__dirname, '../../uploads/thumbnails', `${slideId}.jpg`)
+  ];
+  // Use WSI overview/thumbnail only — cassette macros have a different coordinate frame.
+  let overview = null;
+  let bestPixels = -1;
+  for (const c of candidates) {
+    if (!(await fs.pathExists(c))) continue;
+    try {
+      const m = await sharp(c).metadata();
+      const px = (m.width || 0) * (m.height || 0);
+      if (px > bestPixels) { bestPixels = px; overview = c; }
+    } catch (e) {
+      if (!overview) overview = c;
+    }
+  }
+  if (!overview) {
+    const err = new Error('kfb overview missing');
+    err.status = 404;
+    throw err;
+  }
+  const d = 2 ** (maxLevel - level);
+  const levelWidth = Math.max(1, Math.ceil(width / d));
+  const levelHeight = Math.max(1, Math.ceil(height / d));
+  const meta = await sharp(overview).metadata();
+  const ow = meta.width || 1;
+  const oh = meta.height || 1;
+  const left = Math.floor((col * tileSize * ow) / levelWidth);
+  const top = Math.floor((row * tileSize * oh) / levelHeight);
+  const right = Math.ceil((Math.min(levelWidth, (col + 1) * tileSize) * ow) / levelWidth);
+  const bottom = Math.ceil((Math.min(levelHeight, (row + 1) * tileSize) * oh) / levelHeight);
+  const extractLeft = Math.max(0, Math.min(left, ow - 1));
+  const extractTop = Math.max(0, Math.min(top, oh - 1));
+  const extractWidth = Math.max(1, Math.min(right - extractLeft, ow - extractLeft));
+  const extractHeight = Math.max(1, Math.min(bottom - extractTop, oh - extractTop));
+  await fs.ensureDir(path.dirname(dest));
+  const tmp = `${dest}.tmp.jpg`;
+  await sharp(overview)
+    .extract({ left: extractLeft, top: extractTop, width: extractWidth, height: extractHeight })
+    .resize(tileSize, tileSize, { fit: 'fill' })
+    .jpeg({ quality: 85 })
+    .toFile(tmp);
+  await fs.move(tmp, dest, { overwrite: true });
+  return dest;
 }
 
 async function ensureTile(slideId, level, col, row) {
@@ -99,7 +150,24 @@ async function ensureTile(slideId, level, col, row) {
     }
 
     if (isKfb(slide)) {
-      await extractKfbTile(src, Number(level), col, row, dest);
+      const lv = Number(level);
+      // Coarse levels: crop associated overview (vendor fscale<1 ROIs are broken).
+      // Native level: decode 256px tiles at fscale=1.0 via the KFB worker.
+      if (lv < maxLevel) {
+        await withSharpLimit(() => generateKfbOverviewTile({
+          slideId,
+          level: lv,
+          col,
+          row,
+          tileSize,
+          maxLevel,
+          width,
+          height,
+          dest
+        }));
+      } else {
+        await extractKfbTile(src, lv, col, row, dest);
+      }
     } else {
       await withSharpLimit(() => generateOneTile(src, dest, {
         level: Number(level),
