@@ -105,10 +105,10 @@ router.get('/:id/info', authenticateToken, async (req, res) => {
   }
 });
 
-// Update slide
+// Update slide (including clinical info)
 router.put('/:id', authenticateToken, requireRole('teacher', 'admin'), async (req, res) => {
   try {
-    const { name, description, course_id } = req.body;
+    const { name, description, course_id, gender, age, diagnosis, other_info, case_no, sampling_site, institution, microscopic, ihc } = req.body;
 
     const slide = await get('SELECT * FROM slides WHERE id = ?', [req.params.id]);
     if (!slide) {
@@ -121,8 +121,8 @@ router.put('/:id', authenticateToken, requireRole('teacher', 'admin'), async (re
     }
 
     await run(
-      'UPDATE slides SET name = ?, description = ?, course_id = ? WHERE id = ?',
-      [name, description, course_id || null, req.params.id]
+      'UPDATE slides SET name = ?, description = ?, course_id = ?, gender = ?, age = ?, diagnosis = ?, other_info = ?, case_no = ?, sampling_site = ?, institution = ?, microscopic = ?, ihc = ? WHERE id = ?',
+      [name, description, course_id || null, gender || '', age || '', diagnosis || '', other_info || '', case_no || '', sampling_site || '', institution || '', microscopic || '', ihc || '', req.params.id]
     );
 
     const updated = await get('SELECT * FROM slides WHERE id = ?', [req.params.id]);

@@ -217,6 +217,9 @@ export default function CourseDetail() {
                   )}
                 </div>
                 <h3 className="font-medium text-gray-900 truncate">{slide.name}</h3>
+                {slide.diagnosis && (
+                  <p className="text-xs text-gray-500 mt-1 truncate">诊断: {slide.diagnosis}</p>
+                )}
                 <p className="text-sm text-gray-500 mt-1">
                   {new Date(slide.created_at).toLocaleDateString()}
                 </p>

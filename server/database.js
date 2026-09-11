@@ -71,6 +71,7 @@ function initDatabase() {
           thumbnail_path TEXT,
           course_id INTEGER,
           uploaded_by INTEGER NOT NULL,
+          share_token TEXT,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (course_id) REFERENCES courses(id),
           FOREIGN KEY (uploaded_by) REFERENCES users(id)
@@ -84,10 +85,43 @@ function initDatabase() {
         // Create default teacher account
         try {
           await createDefaultUser();
-          resolve();
         } catch (e) {
-          resolve(); // Continue even if default user exists
+          // Continue even if default user exists
         }
+
+        // ---- Migration: add share_token column to slides (for pre-existing DBs) ----
+        try {
+          const cols = await query(`PRAGMA table_info(slides)`);
+          if (!cols.some(c => c.name === 'share_token')) {
+            await run(`ALTER TABLE slides ADD COLUMN share_token TEXT`);
+            console.log('Migration: added share_token column to slides');
+          }
+        } catch (e) {
+          console.error('Migration failed (share_token):', e.message);
+        }
+
+        // ---- Migration: add enriched case/metadata columns (病理号/取材部位/机构/镜下所见/免疫组化) ----
+        const caseColumns = {
+          case_no: 'TEXT',        // 病理号
+          sampling_site: 'TEXT',  // 取材部位
+          institution: 'TEXT',    // 医疗机构
+          microscopic: 'TEXT',    // 镜下所见
+          ihc: 'TEXT',            // 免疫组化
+          micro_per_px: 'REAL'    // 微米/像素 (kfb CapRes, 用于尺标/倍率)
+        };
+        try {
+          const cols = await query(`PRAGMA table_info(slides)`);
+          for (const [name, type] of Object.entries(caseColumns)) {
+            if (!cols.some(c => c.name === name)) {
+              await run(`ALTER TABLE slides ADD COLUMN ${name} ${type}`);
+              console.log(`Migration: added ${name} column to slides`);
+            }
+          }
+        } catch (e) {
+          console.error('Migration failed (case columns):', e.message);
+        }
+
+        resolve();
       });
     });
   });

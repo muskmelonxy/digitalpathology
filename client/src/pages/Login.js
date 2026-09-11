@@ -98,11 +98,6 @@ export default function Login() {
               </Link>
             </p>
           </div>
-
-          <div className="mt-8 p-4 bg-gray-50 rounded-lg text-sm text-gray-600">
-            <p className="font-medium mb-2">Demo Credentials:</p>
-            <p>Teacher: <code className="bg-gray-200 px-2 py-1 rounded">teacher / teacher123</code></p>
-          </div>
         </div>
       </div>
     </div>

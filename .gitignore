@@ -45,3 +45,4 @@ Thumbs.db
 
 # Test files
 uploads/test_*
+__pycache__/
