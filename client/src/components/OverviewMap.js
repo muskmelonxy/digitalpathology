@@ -63,24 +63,31 @@ export default function OverviewMap({
   return (
     <div className="absolute top-3 left-3 z-20 flex flex-col gap-1 select-none" style={{ width: 176 }}>
       {overviewSrc && (
-        <div
-          ref={mapRef}
-          onClick={onMapClick}
-          className="relative bg-black/80 rounded overflow-hidden shadow-lg cursor-crosshair border border-white/20"
-          title="Overview — click to pan"
-        >
-          <img src={overviewSrc} alt="" className="w-full block pointer-events-none" />
-          {rect && (
-            <div
-              className="absolute border-2 border-red-500 shadow-[0_0_0_1px_rgba(255,255,255,0.7)] pointer-events-none"
-              style={rect}
-            />
-          )}
+        <div className="bg-black/80 rounded shadow-lg border border-white/20 p-1">
+          <div
+            ref={mapRef}
+            onClick={onMapClick}
+            className="relative cursor-crosshair"
+            title="Overview — click to pan"
+          >
+            <img src={overviewSrc} alt="" className="w-full block pointer-events-none" />
+            {rect && (
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  ...rect,
+                  outline: '2px solid #ef4444',
+                  outlineOffset: '-2px',
+                  boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.85)'
+                }}
+              />
+            )}
+          </div>
         </div>
       )}
 
       {presets && presets.length > 0 && (
-        <div className="flex flex-wrap gap-0.5 bg-black/70 rounded px-1 py-1">
+        <div className="flex flex-nowrap justify-between gap-px bg-black/70 rounded px-0.5 py-1">
           {presets.map((m) => (
             <button
               key={m}

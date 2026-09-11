@@ -319,19 +319,6 @@ export default function SlideViewer() {
           {/* µm 尺标 (bottom-right) */}
           <ScaleBar viewerRef={osdRef} microPerPx={slide.micro_per_px} osdReady={osdReady} />
 
-          {/* Navigation Overlay */}
-          <div className="absolute top-1/2 left-4 -translate-y-1/2">
-            <button className="p-2 bg-white/90 backdrop-blur rounded-lg shadow hover:bg-white">
-              <span className="sr-only">Previous</span>
-              &#8249;
-            </button>
-          </div>
-          <div className="absolute top-1/2 right-4 -translate-y-1/2">
-            <button className="p-2 bg-white/90 backdrop-blur rounded-lg shadow hover:bg-white">
-              <span className="sr-only">Next</span>
-              &#8250;
-            </button>
-          </div>
         </div>
 
         {/* Info Sidebar */}
