@@ -153,25 +153,114 @@ async function makeThumbnail(meta, slideId, tilesDir, thumbDir) {
   }
 }
 
-async function processKFB(slideId, filePath, uploadsDir, opts = {}) {
-  const runtime = checkKfbRuntime();
-  if (!runtime.ok) {
-    throw new Error(`KFB runtime not ready: ${runtime.problems.join('; ')}`);
-  }
+function converterArgs(slideId, filePath, uploadsDir, extra = []) {
   const paths = resolveVendorPaths();
   const tilesRoot = path.join(uploadsDir, 'tiles');
-  await fs.ensureDir(tilesRoot);
-
   const args = [
     SCRIPT,
     '--kfb', filePath,
     '--tid', String(slideId),
     '--tiledir', tilesRoot,
     '--dll', paths.dll,
-    '--blank', paths.blank
+    '--blank', paths.blank,
+    '--uploads', uploadsDir,
+    ...extra
   ];
   if (process.env.KFB_CROP_CONTENT === '1') args.push('--crop-content');
+  return args;
+}
 
+async function jpegIfNeeded(filePath) {
+  if (!filePath) return null;
+  if (/\.jpe?g$/i.test(filePath) && await fs.pathExists(filePath)) return filePath;
+  const bmp = filePath.replace(/\.jpe?g$/i, '.bmp');
+  const src = (await fs.pathExists(filePath)) ? filePath
+    : ((await fs.pathExists(bmp)) ? bmp : null);
+  if (!src) return null;
+  if (/\.jpe?g$/i.test(src)) return src;
+  const dest = src.replace(/\.bmp$/i, '.jpg');
+  await sharp(src).jpeg({ quality: 85 }).toFile(dest);
+  await fs.remove(src).catch(() => {});
+  return dest;
+}
+
+async function finalizeAssocImages(slideId, uploadsDir) {
+  const names = ['thumbnails', 'overviews', 'labels', 'macros'];
+  const out = {};
+  for (const dir of names) {
+    const jpg = path.join(uploadsDir, dir, `${slideId}.jpg`);
+    const bmp = path.join(uploadsDir, dir, `${slideId}.bmp`);
+    const converted = await jpegIfNeeded(jpg).catch(() => null)
+      || await jpegIfNeeded(bmp).catch(() => null);
+    if (converted) out[dir] = `/uploads/${dir}/${slideId}.jpg`;
+  }
+  const overviewPath = path.join(uploadsDir, 'overviews', `${slideId}.jpg`);
+  if (out.overviews && await fs.pathExists(overviewPath)) {
+    const tmp = `${overviewPath}.tmp.jpg`;
+    await sharp(overviewPath)
+      .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toFile(tmp);
+    await fs.move(tmp, overviewPath, { overwrite: true });
+  }
+  // If we have a thumbnail but no overview yet, copy/resize thumbnail → overview.
+  if (out.thumbnails && !out.overviews) {
+    const src = path.join(uploadsDir, 'thumbnails', `${slideId}.jpg`);
+    const dest = path.join(uploadsDir, 'overviews', `${slideId}.jpg`);
+    await fs.ensureDir(path.dirname(dest));
+    await sharp(src).resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85 }).toFile(dest);
+    out.overviews = `/uploads/overviews/${slideId}.jpg`;
+  }
+  if (out.thumbnails) {
+    const src = path.join(uploadsDir, 'thumbnails', `${slideId}.jpg`);
+    await sharp(src).resize(400, 400, { fit: 'inside' }).jpeg({ quality: 80 })
+      .toFile(src);
+  }
+  return out;
+}
+
+/**
+ * Fast path: associated images (label / macro / thumbnail) + coarsest tiles.
+ * Viewer can open immediately; remaining 256px tiles are decoded on demand.
+ */
+async function previewKFB(slideId, filePath, uploadsDir, opts = {}) {
+  const runtime = checkKfbRuntime();
+  if (!runtime.ok) {
+    throw new Error(`KFB runtime not ready: ${runtime.problems.join('; ')}`);
+  }
+  await fs.ensureDir(path.join(uploadsDir, 'tiles'));
+  await fs.ensureDir(path.join(uploadsDir, 'labels'));
+  await fs.ensureDir(path.join(uploadsDir, 'macros'));
+  await fs.ensureDir(path.join(uploadsDir, 'overviews'));
+  await fs.ensureDir(path.join(uploadsDir, 'thumbnails'));
+
+  const timeoutMs = Number(opts.timeoutMs || process.env.KFB_PREVIEW_TIMEOUT_MS || 120000);
+  const meta = await runConverter(converterArgs(slideId, filePath, uploadsDir, ['--preview']), {
+    timeoutMs,
+    onProgress: opts.onProgress
+  });
+  const assoc = await finalizeAssocImages(slideId, uploadsDir);
+  meta.thumbnailPath = assoc.thumbnails || null;
+  meta.hasLabel = !!assoc.labels;
+  meta.hasMacro = !!assoc.macros;
+  meta.tileMode = 'ondemand';
+  if (!meta.thumbnailPath) {
+    const tilesDir = path.join(uploadsDir, 'tiles', String(slideId));
+    meta.thumbnailPath = await makeThumbnail(meta, slideId, tilesDir, path.join(uploadsDir, 'thumbnails'));
+  }
+  return meta;
+}
+
+async function processKFB(slideId, filePath, uploadsDir, opts = {}) {
+  const runtime = checkKfbRuntime();
+  if (!runtime.ok) {
+    throw new Error(`KFB runtime not ready: ${runtime.problems.join('; ')}`);
+  }
+  const tilesRoot = path.join(uploadsDir, 'tiles');
+  await fs.ensureDir(tilesRoot);
+
+  const args = converterArgs(slideId, filePath, uploadsDir);
   let viewableNotified = false;
   const meta = await runConverter(args, {
     onProgress: async (evt) => {
@@ -187,10 +276,20 @@ async function processKFB(slideId, filePath, uploadsDir, opts = {}) {
     }
   });
 
+  const assoc = await finalizeAssocImages(slideId, uploadsDir).catch(() => ({}));
   const slideTilesDir = path.join(tilesRoot, String(slideId));
-  const thumb = await makeThumbnail(meta, slideId, slideTilesDir, path.join(uploadsDir, 'thumbnails'));
+  const thumb = assoc.thumbnails
+    || await makeThumbnail(meta, slideId, slideTilesDir, path.join(uploadsDir, 'thumbnails'));
   meta.thumbnailPath = thumb;
+  meta.tileMode = 'prebuilt';
   return meta;
 }
 
-module.exports = { processKFB, runConverter, makeThumbnail, checkKfbRuntime };
+module.exports = {
+  processKFB,
+  previewKFB,
+  runConverter,
+  makeThumbnail,
+  checkKfbRuntime,
+  finalizeAssocImages
+};

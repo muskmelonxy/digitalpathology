@@ -199,6 +199,129 @@ function pickSourcePage(pages) {
   return ranked[0];
 }
 
+/** Smallest page whose width is at least neededWidth (avoid upscaling). */
+function pickPageForNeededWidth(pages, neededWidth) {
+  if (!pages || pages.length === 0) return null;
+  const ranked = [...pages].sort((a, b) => a.width - b.width);
+  return ranked.find(p => p.width >= neededWidth) || ranked[ranked.length - 1];
+}
+
+function pyramidMetaPath(tilesDir) {
+  return path.join(tilesDir, 'pyramid.json');
+}
+
+async function writePyramidMeta(tilesDir, meta) {
+  await fs.ensureDir(tilesDir);
+  await fs.writeJson(pyramidMetaPath(tilesDir), meta);
+}
+
+async function readPyramidMeta(tilesDir) {
+  const p = pyramidMetaPath(tilesDir);
+  if (!await fs.pathExists(p)) return null;
+  try {
+    return await fs.readJson(p);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * One 256px JPEG at server level/col/row. Uses the closest TIFF/SVS page
+ * when available so we do not decode the full-resolution plane for coarse tiles.
+ */
+async function generateOneTile(sourcePath, destPath, opts) {
+  const {
+    level,
+    col,
+    row,
+    tileSize = 256,
+    maxLevel,
+    sourceWidth,
+    sourceHeight,
+    sourcePage = null,
+    pages = null
+  } = opts;
+
+  const scale = 2 ** (maxLevel - level);
+  const srcTile = tileSize * scale;
+  const fullLeft = col * srcTile;
+  const fullTop = row * srcTile;
+  if (fullLeft >= sourceWidth || fullTop >= sourceHeight) return false;
+
+  const levelWidth = Math.ceil(sourceWidth / scale);
+  const levelHeight = Math.ceil(sourceHeight / scale);
+  const tw = Math.min(tileSize, levelWidth - col * tileSize);
+  const th = Math.min(tileSize, levelHeight - row * tileSize);
+  if (tw < 1 || th < 1) return false;
+
+  let page = sourcePage;
+  let pageW = sourceWidth;
+  let pageH = sourceHeight;
+  if (Array.isArray(pages) && pages.length > 0) {
+    const chosen = pickPageForNeededWidth(pages, levelWidth);
+    if (chosen) {
+      page = chosen.page;
+      pageW = chosen.width;
+      pageH = chosen.height;
+    }
+  }
+
+  const sx = pageW / sourceWidth;
+  const sy = pageH / sourceHeight;
+  const left = Math.max(0, Math.min(pageW - 1, Math.floor(fullLeft * sx)));
+  const top = Math.max(0, Math.min(pageH - 1, Math.floor(fullTop * sy)));
+  const width = Math.max(1, Math.min(pageW - left, Math.ceil(srcTile * sx)));
+  const height = Math.max(1, Math.min(pageH - top, Math.ceil(srcTile * sy)));
+
+  const open = { limitInputPixels: false };
+  if (page != null) open.page = page;
+
+  await fs.ensureDir(path.dirname(destPath));
+  try {
+    let pipeline = sharp(sourcePath, open)
+      .extract({ left, top, width, height })
+      .resize(tw, th, { fit: 'fill', kernel: sharp.kernel.lanczos3 });
+    if (tw < tileSize || th < tileSize) {
+      pipeline = pipeline.extend({
+        top: 0,
+        left: 0,
+        right: tileSize - tw,
+        bottom: tileSize - th,
+        background: { r: 240, g: 240, b: 240 }
+      });
+    }
+    await pipeline.jpeg({ quality: 80 }).toFile(destPath);
+    return true;
+  } catch (e) {
+    await sharp({
+      create: {
+        width: tileSize,
+        height: tileSize,
+        channels: 3,
+        background: { r: 240, g: 240, b: 240 }
+      }
+    }).jpeg({ quality: 75 }).toFile(destPath);
+    return false;
+  }
+}
+
+async function generateOverviewFromSource(sourcePath, destPath, opts = {}) {
+  const maxEdge = opts.maxEdge || 1600;
+  const pages = opts.pages;
+  let page = opts.sourcePage;
+  if (pages && pages.length) {
+    const chosen = pickPageForNeededWidth(pages, maxEdge);
+    if (chosen) page = chosen.page;
+  }
+  const open = { limitInputPixels: false, sequentialRead: true };
+  if (page != null) open.page = page;
+  await fs.ensureDir(path.dirname(destPath));
+  await sharp(sourcePath, open)
+    .resize({ width: maxEdge, height: maxEdge, fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 85 })
+    .toFile(destPath);
+}
+
 module.exports = {
   calcMaxLevel,
   expectedGrid,
@@ -206,5 +329,11 @@ module.exports = {
   generateCoarseLevels,
   generatePyramid,
   pickSourcePage,
-  extractPaddedTile
+  pickPageForNeededWidth,
+  extractPaddedTile,
+  generateOneTile,
+  generateOverviewFromSource,
+  writePyramidMeta,
+  readPyramidMeta,
+  pyramidMetaPath
 };

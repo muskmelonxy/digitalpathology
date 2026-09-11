@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { query, get, run } = require('../database');
 const { authenticateToken, requireRole } = require('../middleware/auth');
+const { slideAssetFlags } = require('../utils/slideAssets');
 
 // Get all slides (with access control)
 router.get('/', authenticateToken, async (req, res) => {
@@ -63,7 +64,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
       }
     }
 
-    res.json(slide);
+    res.json({ ...slide, ...slideAssetFlags(slide.id) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -100,7 +101,10 @@ router.get('/:id/info', authenticateToken, async (req, res) => {
       maxLevel: slide.max_level,
       tilesVersion: slide.tiles_version || 1,
       pyramidComplete: slide.pyramid_complete !== 0,
-      format: 'jpg'
+      format: 'jpg',
+      ...slideAssetFlags(slide.id),
+      thumbnailPath: slide.thumbnail_path,
+      microPerPx: slide.micro_per_px
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

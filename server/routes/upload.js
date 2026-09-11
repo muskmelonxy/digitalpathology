@@ -67,8 +67,8 @@ router.post('/', authenticateToken, requireRole('teacher', 'admin'), upload.sing
         diagnosis || '',
         other_info || '',
         originalFormat === 'kfb' || originalFormat === 'kfbio'
-          ? 'Queued — native KFB decode'
-          : 'Queued — building pyramid'
+          ? 'Queued — native KFB preview'
+          : 'Queued — preparing overview'
       ]
     );
 

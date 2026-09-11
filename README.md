@@ -95,15 +95,16 @@ DigitalSlideSystem/
 
 ### Slide Processing
 1. User uploads a slide (HTTP returns immediately with `status=processing`).
-2. Coarse zoom levels (overview) are generated first and the slide is marked **viewable**.
-3. Remaining high-resolution tiles finish in the background (`pyramid_complete=0` until done).
-4. Tiles live at `/tiles/<id>/<level>/<col>_<row>.jpg` (level 0 = lowest res).
-5. OpenSeadragon loads the coarsest tiles first, then refines on zoom. Cache-Control is 7 days immutable; URLs include `tiles_version`.
+2. A **useful preview** is built first: low-res overview/macro JPEG, thumbnail, and (for KFB) the slide **label** image. Coarsest 256px tiles are written so the home view is instant.
+3. The slide is marked **ready** (`pyramid_complete=1`). Remaining zoom levels are **not** pre-rendered. OpenSeadragon requests only the visible 256 JPEG tiles; the server generates missing `{level}/{col}_{row}.jpg` files on demand and caches them (`Cache-Control: public, max-age=604800, immutable`).
+4. KFB never waits on a full-file convert. A persistent Python worker keeps the vendor decoder open and answers tile requests (same 256-grid as the rest of the app). Optional `SLIDE_PREBUILD_PYRAMID=1` restores the old full-pyramid background build.
+5. Tiles live at `/tiles/<id>/<level>/<col>_<row>.jpg` (level 0 = lowest res). URLs include `tiles_version`. Missing tiles are a real 404 until generated (never the SPA HTML).
 
 ### Architecture
-- **Deep Zoom**: Pyramid tiling (256×256 JPEG)
-- **TIFF/JPEG/PNG/SVS**: libvips `sharp.tile` (google layout remapped to the existing grid)
-- **KFB**: Python `kfb_extract.py` + vendor `.so` (no full-file convert-to-TIFF wait)
+- **Deep Zoom**: On-demand 256×256 JPEG pyramid (overview-first)
+- **TIFF/JPEG/PNG/SVS**: Sharp extract from the best matching pyramid page
+- **KFB**: Python `kfb_extract.py --preview` / `--serve` + vendor `.so` (no full-file convert-to-TIFF wait)
+- **Navigator**: static overview JPEG + red viewport rectangle (OSD's built-in navigator is off so it does not fetch extra tiles)
 - **Share links**: `/s/<token>` — public viewer, optional viewport hash `#x,y,zoom`
 
 ## Development Notes
@@ -112,17 +113,19 @@ DigitalSlideSystem/
 KFB files are decoded with the KFBIO vendor library that ships in `vendor/lib/libImageOperationLib.so`. That library needs **libjpeg.so.9** (Ubuntu's default is `.so.8`). This repo includes a stripped `vendor/lib/libjpeg.so.9` and the Node process sets `LD_LIBRARY_PATH` automatically.
 
 1. Paths resolve relative to the repo (`vendor/…`). The old hardcoded `/www/digitalpathology/…` path is only a fallback.
-2. Upload a `.kfb` / `.kfbio` file. Status polling shows decode progress; the viewer opens after the overview level exists.
+2. Upload a `.kfb` / `.kfbio` file. Preview (overview + label) is ready without decoding every zoom level; pan/zoom fetches 256px JPEGs on demand.
 3. Optional content-bbox scan (slow, usually unnecessary): `KFB_CROP_CONTENT=1`.
 4. Runtime check: `node scripts/check-kfb-runtime.js` or `GET /api/system/kfb` (teacher/admin).
 5. If the decoder `.so` will not load: `bash scripts/install-kfb-deps.sh`.
+6. To restore full pre-build (old behaviour): `SLIDE_PREBUILD_PYRAMID=1`.
 
-Env overrides: `PFB_PYTHON`, `KFB_DLL`, `KFB_BLANK`, `KFB_LIBJPEG`, `KFB_TIMEOUT_MS` (default 30 min).
+Env overrides: `PFB_PYTHON`, `KFB_DLL`, `KFB_BLANK`, `KFB_LIBJPEG`, `KFB_TIMEOUT_MS` (full prebuild, default 30 min), `KFB_PREVIEW_TIMEOUT_MS` (default 2 min), `KFB_WORKERS` (concurrent open KFB files, default 3), `SLIDE_PREBUILD_PYRAMID`.
 
 ### Performance
-- Viewer does **not** destroy/recreate OpenSeadragon when the overview JPEG arrives (that used to refetch every tile).
-- Missing `/tiles/…` requests return a real 404 (not the SPA HTML), so pan/zoom is not poisoned.
-- Parallel tile fetch: `imageLoaderLimit=32`, `immediateRender`, `minPixelRatio=0.5`.
+- Overview JPEG paints immediately (CSS placeholder); OpenSeadragon is **not** destroyed when it arrives.
+- Only **visible** 256 JPEG tiles at the current pyramid level are fetched, in parallel (`imageLoaderLimit=32`, `immediateRender`, `minPixelRatio=0.5`).
+- Missing `/tiles/…` requests return a real 404 (not the SPA HTML). Successful tiles are cached 7 days.
+- Custom overview map with a red viewport rectangle; wheel zoom + drag pan; scale bar in mm or µm.
 - Check scripts: `npm run test:viewer`
 
 ### Security
@@ -224,7 +227,8 @@ Do not Docker-ize unless you want to; the vendor `.so` is Linux x86_64 and expec
 - `GET /api/system/kfb` - KFB decoder runtime check (teacher/admin)
 
 ### Tiles
-- `GET /tiles/:slideId/:level/:col_:row.jpg` - Static tiles (used by the viewer)
+- `GET /tiles/:slideId/:level/:col_:row.jpg` - On-demand 256 JPEG tiles (cached after first generate)
+- `GET /uploads/labels/:id.jpg` / `/uploads/macros/:id.jpg` - KFB associated images when present
 - `GET /api/tiles/:slideId/:level/:col/:row.jpg` - Authenticated tile API (legacy)
 
 ## License

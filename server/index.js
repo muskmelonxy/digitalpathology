@@ -8,6 +8,7 @@ const authRoutes = require('./routes/auth');
 const slideRoutes = require('./routes/slides');
 const courseRoutes = require('./routes/courses');
 const uploadRoutes = require('./routes/upload');
+const { tileMiddleware } = require('./utils/tileServe');
 const tileRoutes = require('./routes/tiles');
 const shareRoutes = require('./routes/share');
 const systemRoutes = require('./routes/system');
@@ -34,6 +35,8 @@ fs.ensureDirSync(path.join(__dirname, '../uploads/tiles'));
 fs.ensureDirSync(path.join(__dirname, '../uploads/thumbnails'));
 fs.ensureDirSync(path.join(__dirname, '../uploads/overviews'));
 fs.ensureDirSync(path.join(__dirname, '../uploads/temp'));
+fs.ensureDirSync(path.join(__dirname, '../uploads/labels'));
+fs.ensureDirSync(path.join(__dirname, '../uploads/macros'));
 
 // Middleware
 app.use(cors());
@@ -53,18 +56,7 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
     }
   }
 }));
-app.use('/tiles', express.static(path.join(__dirname, '../uploads/tiles'), {
-  maxAge: '7d',
-  immutable: true,
-  index: false,
-  fallthrough: false,
-  setHeaders(res, filePath) {
-    if (/\.jpe?g$/i.test(filePath)) {
-      res.setHeader('Content-Type', 'image/jpeg');
-      res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
-    }
-  }
-}));
+app.use('/tiles', tileMiddleware);
 
 // API Routes
 app.use('/api/auth', authRoutes);

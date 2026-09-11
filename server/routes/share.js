@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const { get, run } = require('../database');
 const { authenticateToken, requireRole } = require('../middleware/auth');
+const { slideAssetFlags } = require('../utils/slideAssets');
 
 // Build a share URL for a token
 function buildShareUrl(req, token) {
@@ -60,7 +61,8 @@ router.get('/public/:token', async (req, res) => {
       original_format: slide.original_format,
       course_name: slide.course_name,
       uploaded_by_name: slide.uploaded_by_name,
-      created_at: slide.created_at
+      created_at: slide.created_at,
+      ...slideAssetFlags(slide.id)
     });
   } catch (e) {
     res.status(500).json({ error: e.message });

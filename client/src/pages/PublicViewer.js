@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import axios from 'axios';
 import OpenSeadragon from 'openseadragon';
 import { ZoomIn, ZoomOut, RotateCcw, Info, Maximize, Minimize } from 'lucide-react';
+import OverviewMap from '../components/OverviewMap';
 import ZoomControls from '../components/ZoomControls';
 import ColorAdjust, { defaultColor, applyColorToViewer } from '../components/ColorAdjust';
 import ScaleBar from '../components/ScaleBar';
@@ -11,7 +12,10 @@ import {
   buildOsdOptions,
   applyViewportHash,
   bindViewportHash,
-  placeholderStyle
+  placeholderStyle,
+  currentMagnification,
+  zoomForMagnification,
+  MAG_PRESETS
 } from '../lib/osdConfig';
 
 // Public read-only slide viewer, opened via a share link (/s/:token).
@@ -78,8 +82,7 @@ export default function PublicViewer() {
     osdRef.current.addHandler('zoom', () => {
       const z = osdRef.current.viewport.getZoom();
       setCurrentZoom(z);
-      const hz = homeZoomRef.current;
-      if (hz) setMultiple(Math.round((z / hz) * 100) / 100);
+      setMultiple(Math.round(currentMagnification(osdRef.current) * 10) / 10);
     });
 
     let unbindHash = () => {};
@@ -91,10 +94,11 @@ export default function PublicViewer() {
       applyColorToViewer(osdRef.current, colorRef.current);
       const usedHash = applyViewportHash(osdRef.current);
       unbindHash = bindViewportHash(osdRef.current);
+      setMultiple(Math.round(currentMagnification(osdRef.current) * 10) / 10);
       if (usedHash) {
         const z = osdRef.current.viewport.getZoom();
         setCurrentZoom(z);
-        setMultiple(Math.round((z / hz) * 100) / 100);
+        setMultiple(Math.round(currentMagnification(osdRef.current) * 10) / 10);
       }
       setOsdReady(true);
     });
@@ -118,9 +122,8 @@ export default function PublicViewer() {
   const handleZoomOut = () => osdRef.current?.viewport.zoomBy(0.667);
   const handleReset = () => osdRef.current?.viewport.goHome();
   const handleSetMultiple = (m) => {
-    const hz = homeZoomRef.current;
-    if (!hz) return;
-    osdRef.current?.viewport.zoomTo(hz * m);
+    if (!osdRef.current) return;
+    osdRef.current.viewport.zoomTo(zoomForMagnification(osdRef.current, m));
   };
   const handleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -181,12 +184,24 @@ export default function PublicViewer() {
         <div className="flex-1 relative bg-gray-900 rounded-lg overflow-hidden">
           <div ref={viewerRef} className="w-full h-full" style={placeholderStyle(placeholderSrc)} />
 
+          <OverviewMap
+            overviewSrc={placeholderSrc}
+            labelSrc={slide.has_label ? `/uploads/labels/${slide.id}.jpg` : null}
+            width={slide.width}
+            height={slide.height}
+            viewerRef={osdRef}
+            osdReady={osdReady}
+            presets={MAG_PRESETS}
+            magnification={multiple}
+            onSetMagnification={handleSetMultiple}
+          />
+
           <ScaleBar viewerRef={osdRef} microPerPx={slide.micro_per_px} osdReady={osdReady} />
 
           {/* Zoom slider + magnification presets (bottom-left) */}
           <ZoomControls
-            multiple={multiple}
-            onSetMultiple={handleSetMultiple}
+            magnification={multiple}
+            onSetMagnification={handleSetMultiple}
             onZoomIn={handleZoomIn}
             onZoomOut={handleZoomOut}
             onHome={handleReset}
@@ -197,7 +212,7 @@ export default function PublicViewer() {
               <ZoomOut className="w-5 h-5" />
             </button>
             <span className="text-sm font-medium min-w-[60px] text-center">
-              {Math.round(multiple * 100)}%
+              {multiple >= 10 ? `${Math.round(multiple)}×` : `${Number(multiple).toFixed(1)}×`}
             </span>
             <button onClick={handleZoomIn} className="p-2 hover:bg-gray-100 rounded" title="放大">
               <ZoomIn className="w-5 h-5" />

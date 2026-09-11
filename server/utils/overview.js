@@ -16,7 +16,7 @@ async function ensureOverview(slide, { force = false } = {}) {
   if (!force && fs.existsSync(outPath)) return `/uploads/overviews/${slide.id}.jpg`;
 
   const tilesBase = path.join(__dirname, '../../uploads/tiles', String(slide.id));
-  const { width, height, max_level: maxLevel, tile_size: tileSize } = slide;
+  const { width, height, max_level: maxLevel, tile_size: tileSize, filename, original_format } = slide;
   if (!width || !height || maxLevel == null) return null;
 
   let bestL = null, bestDiff = Infinity;
@@ -27,7 +27,27 @@ async function ensureOverview(slide, { force = false } = {}) {
     const diff = Math.abs(levelW - TARGET_W);
     if (diff < bestDiff) { bestDiff = diff; bestL = l; }
   }
-  if (bestL == null) return null;
+
+  if (bestL == null) {
+    const src = filename ? path.join(__dirname, '../../uploads/slides', filename) : null;
+    const fmt = String(original_format || '').toLowerCase();
+    if (src && fs.existsSync(src) && fmt !== 'kfb' && fmt !== 'kfbio') {
+      try {
+        const { generateOverviewFromSource, readPyramidMeta } = require('./pyramid');
+        const meta = await readPyramidMeta(tilesBase);
+        await generateOverviewFromSource(src, outPath, {
+          maxEdge: TARGET_W,
+          sourcePage: meta && meta.source_page,
+          pages: meta && meta.pages
+        });
+        return `/uploads/overviews/${slide.id}.jpg`;
+      } catch (e) {
+        console.error(`Overview from source failed slide ${slide.id}:`, e.message);
+        return null;
+      }
+    }
+    return null;
+  }
 
   const scale = Math.pow(2, maxLevel - bestL);
   const levelW = Math.ceil(width / scale);

@@ -14,6 +14,7 @@ import {
   Minimize
 } from 'lucide-react';
 import ShareModal from '../components/ShareModal';
+import OverviewMap from '../components/OverviewMap';
 import ZoomControls from '../components/ZoomControls';
 import ColorAdjust, { defaultColor, applyColorToViewer } from '../components/ColorAdjust';
 import ScaleBar from '../components/ScaleBar';
@@ -22,7 +23,10 @@ import {
   buildOsdOptions,
   applyViewportHash,
   bindViewportHash,
-  placeholderStyle
+  placeholderStyle,
+  currentMagnification,
+  zoomForMagnification,
+  MAG_PRESETS
 } from '../lib/osdConfig';
 import OpenSeadragon from 'openseadragon';
 
@@ -103,8 +107,7 @@ export default function SlideViewer() {
     osdRef.current.addHandler('zoom', () => {
       const z = osdRef.current.viewport.getZoom();
       setCurrentZoom(z);
-      const hz = homeZoomRef.current;
-      if (hz) setMultiple(Math.round((z / hz) * 100) / 100);
+      setMultiple(Math.round(currentMagnification(osdRef.current) * 10) / 10);
     });
 
     let unbindHash = () => {};
@@ -112,14 +115,14 @@ export default function SlideViewer() {
       const hz = osdRef.current.viewport.getZoom();
       homeZoomRef.current = hz;
       setCurrentZoom(hz);
-      setMultiple(1);
       applyColorToViewer(osdRef.current, colorRef.current);
       const usedHash = applyViewportHash(osdRef.current);
       unbindHash = bindViewportHash(osdRef.current);
+      setMultiple(Math.round(currentMagnification(osdRef.current) * 10) / 10);
       if (usedHash) {
         const z = osdRef.current.viewport.getZoom();
         setCurrentZoom(z);
-        setMultiple(Math.round((z / hz) * 100) / 100);
+        setMultiple(Math.round(currentMagnification(osdRef.current) * 10) / 10);
       }
       setOsdReady(true);
     });
@@ -154,9 +157,8 @@ export default function SlideViewer() {
   };
 
   const handleSetMultiple = (m) => {
-    const hz = homeZoomRef.current;
-    if (!hz) return;
-    osdRef.current?.viewport.zoomTo(hz * m);
+    if (!osdRef.current) return;
+    osdRef.current.viewport.zoomTo(zoomForMagnification(osdRef.current, m));
   };
 
   const handleFullscreen = () => {
@@ -210,7 +212,7 @@ export default function SlideViewer() {
           <div className="h-full bg-blue-600 transition-all" style={{ width: `${pct}%` }} />
         </div>
         <p className="text-sm text-gray-500 mt-2">{pct}%</p>
-        <p className="text-xs text-gray-400 mt-4">The viewer will open as soon as the overview pyramid is ready.</p>
+        <p className="text-xs text-gray-400 mt-4">The viewer opens as soon as the overview is ready. Higher zoom loads tiles on demand.</p>
         <Link to="/slides" className="btn-secondary inline-block mt-4">
           Back to Slides
         </Link>
@@ -267,6 +269,18 @@ export default function SlideViewer() {
         <div className="flex-1 relative bg-gray-900 rounded-lg overflow-hidden">
           <div ref={viewerRef} className="w-full h-full" style={placeholderStyle(placeholderSrc)} />
 
+          <OverviewMap
+            overviewSrc={placeholderSrc}
+            labelSrc={(slide.has_label || slideInfo?.has_label) ? `/uploads/labels/${id}.jpg` : null}
+            width={slideInfo.width}
+            height={slideInfo.height}
+            viewerRef={osdRef}
+            osdReady={osdReady}
+            presets={MAG_PRESETS}
+            magnification={multiple}
+            onSetMagnification={handleSetMultiple}
+          />
+
           {Number(slide.pyramid_complete) === 0 && (
             <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-amber-100/95 text-amber-900 text-xs font-medium px-3 py-1.5 rounded-full shadow">
               Higher magnification still generating…
@@ -279,7 +293,7 @@ export default function SlideViewer() {
               <ZoomOut className="w-5 h-5" />
             </button>
             <span className="text-sm font-medium min-w-[60px] text-center">
-              {Math.round(multiple * 100)}%
+              {multiple >= 10 ? `${Math.round(multiple)}×` : `${Number(multiple).toFixed(1)}×`}
             </span>
             <button onClick={handleZoomIn} className="p-2 hover:bg-gray-100 rounded" title="Zoom In">
               <ZoomIn className="w-5 h-5" />
@@ -295,8 +309,8 @@ export default function SlideViewer() {
 
           {/* Zoom slider + magnification presets (bottom-left) */}
           <ZoomControls
-            multiple={multiple}
-            onSetMultiple={handleSetMultiple}
+            magnification={multiple}
+            onSetMagnification={handleSetMultiple}
             onZoomIn={handleZoomIn}
             onZoomOut={handleZoomOut}
             onHome={handleReset}

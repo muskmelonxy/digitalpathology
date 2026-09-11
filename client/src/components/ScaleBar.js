@@ -1,7 +1,14 @@
 import React, { useEffect, useState } from 'react';
 
-// 病理切片 µm 尺标(左下角): 依据 micro_per_px(微米/像素, kfb CapRes) 与当前视野
-// 实时计算一条"取整"长度(5/10/20/25/50/100/200/500/1000µm)的水平标尺。
+function formatLength(um) {
+  if (um >= 1000) {
+    const mm = um / 1000;
+    return mm >= 10 ? `${Math.round(mm)} mm` : `${mm.toFixed(1)} mm`;
+  }
+  return `${um} µm`;
+}
+
+// Pathology scale bar: µm at high zoom, mm at whole-slide FOV.
 export default function ScaleBar({ viewerRef, microPerPx, osdReady }) {
   const [bar, setBar] = useState(null);
 
@@ -12,32 +19,31 @@ export default function ScaleBar({ viewerRef, microPerPx, osdReady }) {
       if (!v) return;
       const bounds = v.viewport.getBounds();
       const cw = v.container.clientWidth || 1;
-      // 当前一屏: bounds.width 个图像像素铺满 cw 个屏幕像素 => µm/屏幕px
       const umPerPx = (bounds.width / cw) * microPerPx;
       if (!(umPerPx > 0)) return;
-      for (const c of [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000]) {
+      const candidates = [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000, 10000, 20000, 50000];
+      for (const c of candidates) {
         const px = c / umPerPx;
         if (px >= 55 && px <= 230) { setBar({ px, um: c }); return; }
       }
-      // 兜底: 取 ≤5000µm 最长者, 宽度限制在 260px
-      const c = 1000; // 默认
-      const px = Math.min(260, c / umPerPx);
-      setBar({ px, um: c });
+      const c = umPerPx * 120;
+      const snapped = candidates.reduce((best, n) => Math.abs(n - c) < Math.abs(best - c) ? n : best, candidates[0]);
+      const px = Math.min(260, Math.max(40, snapped / umPerPx));
+      setBar({ px, um: snapped });
     };
     update();
-    let handler = update;
     const v = viewerRef.current;
-    v.addHandler('update-viewport', handler);
-    return () => { try { v.removeHandler('update-viewport', handler); } catch (e) {} };
+    v.addHandler('update-viewport', update);
+    return () => { try { v.removeHandler('update-viewport', update); } catch (e) {} };
   }, [viewerRef, microPerPx, osdReady]);
 
   if (!bar || !microPerPx) return null;
 
   return (
-    <div className="absolute bottom-4 right-4 z-10 flex flex-col items-center bg-black/40 rounded px-2 py-1 select-none" title="当前视野内的实际尺寸标尺">
+    <div className="absolute bottom-4 right-4 z-10 flex flex-col items-center bg-black/40 rounded px-2 py-1 select-none" title="Field scale">
       <div style={{ width: bar.px, height: 3, background: '#fff' }}
            className="border-x border-white box-content" />
-      <span className="text-white text-xs mt-0.5 leading-tight">{bar.um} µm</span>
+      <span className="text-white text-xs mt-0.5 leading-tight">{formatLength(bar.um)}</span>
     </div>
   );
 }

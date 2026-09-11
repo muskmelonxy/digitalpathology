@@ -62,11 +62,7 @@ export function buildOsdOptions(element) {
       pinchToZoom: true,
       scrollToZoom: true
     },
-    showNavigator: true,
-    navigatorPosition: 'TOP_LEFT',
-    navigatorSizeRatio: 0.16,
-    navigatorAutoResize: true,
-    navigatorAutoFade: false
+    showNavigator: false,
   };
 }
 
@@ -114,6 +110,23 @@ export function bindViewportHash(viewer) {
     try { viewer.removeHandler('animation-finish', onAnim); } catch (e) {}
     try { viewer.removeHandler('zoom', onAnim); } catch (e) {}
   };
+}
+
+export const NATIVE_MAG = 40;
+export const MAG_PRESETS = [0.3, 1, 2, 4, 10, 20, 40];
+
+/** Magnification where 40× ≈ 1 image pixel per screen pixel (scan objective). */
+export function currentMagnification(viewer, nativeMag = NATIVE_MAG) {
+  if (!viewer || !viewer.viewport) return nativeMag;
+  const nativeZ = viewer.viewport.imageToViewportZoom(1);
+  if (!nativeZ) return nativeMag;
+  return (viewer.viewport.getZoom(true) / nativeZ) * nativeMag;
+}
+
+export function zoomForMagnification(viewer, mag, nativeMag = NATIVE_MAG) {
+  if (!viewer || !viewer.viewport) return 1;
+  const nativeZ = viewer.viewport.imageToViewportZoom(1);
+  return nativeZ * (Number(mag) / nativeMag);
 }
 
 export function placeholderStyle(src) {

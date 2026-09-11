@@ -5,10 +5,16 @@ kfb_extract.py — KFBIO .kfb -> Digital Pathology pyramid tiles
 Uses vendor libImageOperationLib.so. Writes:
     <tiledir>/<slideId>/<level>/<col>_<row>.jpg   (256x256)
 
+Modes:
+  default     full pyramid (coarse → fine)
+  --preview   header + associated images + coarsest level only (on-demand tiles later)
+  --serve     keep the file open; JSON-line commands on stdin (tile/assoc/quit)
+
 stdout: JSON lines
   {"event":"header", ...}
   {"event":"progress", "pct":N, "msg":"...", "viewable":true?}
   {"width","height","maxLevel","tileSize","nTiles", ...}   # final summary
+  {"ok":true,"id":N,...}                                  # --serve replies
 
 Vendor paths default to <repo>/vendor/... (override with --dll / KFB_BLANK /
 KFB_DLL). The old hardcoded /www/digitalpathology/... path is a fallback.
@@ -110,6 +116,23 @@ def load_lib(dll):
     ]
     lib.GetImageDataRoiFunc.restype = ctypes.c_int
     lib.UnInitImageFileFunc.argtypes = [ctypes.POINTER(ImageInfoStruct)]
+
+    assoc_args = [
+        ctypes.POINTER(ImageInfoStruct),
+        ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte)),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    for name in ('GetThumnailImageFunc', 'GetPriviewInfoFunc', 'GetLableInfoFunc'):
+        fn = getattr(lib, name, None)
+        if fn is not None:
+            fn.argtypes = assoc_args
+            fn.restype = ctypes.c_int
+
+    if hasattr(lib, 'DeleteImageDataFunc'):
+        lib.DeleteImageDataFunc.argtypes = [ctypes.c_void_p]
+        lib.DeleteImageDataFunc.restype = None
     return lib
 
 
@@ -124,14 +147,70 @@ def header(lib, info):
     return W.value, H.value, bs.value, cr.value, scale.value
 
 
+def _free_buf(lib, buf):
+    if not buf:
+        return
+    fn = getattr(lib, 'DeleteImageDataFunc', None)
+    if fn is None:
+        return
+    try:
+        fn(buf if isinstance(buf, int) else ctypes.cast(buf, ctypes.c_void_p))
+    except Exception:
+        pass
+
+
 def fetch_tile(lib, info, fscale, x, y):
     buf = ctypes.c_void_p(); ln = ctypes.c_int()
     r = lib.GetImageDataRoiFunc(ctypes.byref(info), ctypes.c_float(fscale),
                                 int(x), int(y), TILE, TILE, ctypes.byref(buf),
                                 ctypes.byref(ln), True)
-    if r != 1 or ln.value <= 0:
+    if r != 1 or ln.value <= 0 or not buf.value:
         return None
-    return ctypes.string_at(buf, ln.value)
+    try:
+        return ctypes.string_at(buf, ln.value)
+    finally:
+        _free_buf(lib, buf.value)
+
+
+def fetch_assoc(lib, info, kind):
+    """kind: thumbnail | preview | label. Returns JPEG/BMP bytes or None."""
+    names = {
+        'thumbnail': 'GetThumnailImageFunc',
+        'preview': 'GetPriviewInfoFunc',
+        'label': 'GetLableInfoFunc',
+    }
+    fn = getattr(lib, names[kind], None)
+    if fn is None:
+        return None
+    data_ptr = ctypes.POINTER(ctypes.c_ubyte)()
+    n_bytes = ctypes.c_int()
+    w = ctypes.c_int()
+    h = ctypes.c_int()
+    try:
+        ok = fn(ctypes.byref(info), ctypes.byref(data_ptr), ctypes.byref(n_bytes),
+                ctypes.byref(w), ctypes.byref(h))
+    except Exception as e:
+        emit({'event': 'warn', 'msg': f'{kind} assoc call failed: {e}'})
+        return None
+    if not ok or not data_ptr or n_bytes.value <= 0:
+        return None
+    try:
+        return ctypes.string_at(data_ptr, n_bytes.value)
+    finally:
+        _free_buf(lib, ctypes.cast(data_ptr, ctypes.c_void_p).value)
+
+
+def save_assoc_bytes(buf, dest_jpg):
+    """Write JPEG as .jpg; BMP as sibling .bmp (Node converts). Returns path written."""
+    os.makedirs(os.path.dirname(dest_jpg), exist_ok=True)
+    if buf[:2] == b'\xff\xd8':
+        with open(dest_jpg, 'wb') as f:
+            f.write(buf)
+        return dest_jpg
+    dest_bmp = dest_jpg[:-4] + '.bmp' if dest_jpg.lower().endswith('.jpg') else dest_jpg + '.bmp'
+    with open(dest_bmp, 'wb') as f:
+        f.write(buf)
+    return dest_bmp
 
 
 def calc_max_level(width, height, tile=TILE):
@@ -142,6 +221,36 @@ def calc_max_level(width, height, tile=TILE):
         w = math.ceil(w / 2)
         h = math.ceil(h / 2)
     return max_level
+
+
+def write_pyramid_json(base, meta):
+    os.makedirs(base, exist_ok=True)
+    path = os.path.join(base, 'pyramid.json')
+    with open(path, 'w') as f:
+        json.dump(meta, f, separators=(',', ':'))
+    return path
+
+
+def extract_level(lib, info, base, lv, cmax, cw, ch, blank_jpeg, crop=None, boxC=0, boxR=0):
+    d = 2 ** (cmax - lv)
+    fs = 1.0 / d
+    cn = math.ceil(cw / (TILE * d))
+    rn = math.ceil(ch / (TILE * d))
+    dd = os.path.join(base, str(lv))
+    os.makedirs(dd, exist_ok=True)
+    n = 0
+    for r in range(rn):
+        for c in range(cn):
+            if fs >= 0.999 and crop is not None:
+                jpg = fetch_tile(lib, info, 1.0, boxC + c, boxR + r)
+            else:
+                jpg = fetch_tile(lib, info, fs, c, r)
+            if not jpg:
+                jpg = blank_jpeg
+            with open(os.path.join(dd, f'{c}_{r}.jpg'), 'wb') as f:
+                f.write(jpg)
+            n += 1
+    return n, cn, rn
 
 
 def scan_content_bbox(lib, info, W, H):
@@ -174,17 +283,242 @@ def scan_content_bbox(lib, info, W, H):
     return cw, ch, minC, minR, (minC, minR, maxC, maxR)
 
 
+def dump_assoc(lib, info, uploads, tid):
+    found = {}
+    if not uploads:
+        return found
+    mapping = {
+        'thumbnail': os.path.join(uploads, 'thumbnails', f'{tid}.jpg'),
+        'preview': os.path.join(uploads, 'macros', f'{tid}.jpg'),
+        'label': os.path.join(uploads, 'labels', f'{tid}.jpg'),
+    }
+    for kind, dest in mapping.items():
+        try:
+            buf = fetch_assoc(lib, info, kind)
+        except Exception as e:
+            emit({'event': 'warn', 'msg': f'{kind} extract failed: {e}'})
+            continue
+        if not buf:
+            continue
+        written = save_assoc_bytes(buf, dest)
+        found[kind] = written
+        emit({'event': 'progress', 'pct': 12, 'msg': f'Associated {kind} ({len(buf)} bytes)'})
+    return found
+
+
+def run_preview(lib, info, args, W, H, cap_res, blank_jpeg):
+    tid = args.tid
+    cw, ch = W, H
+    cmax = calc_max_level(cw, ch)
+    if args.maxlevel is not None:
+        cmax = min(cmax, args.maxlevel)
+
+    emit({
+        'event': 'header',
+        'width': cw, 'height': ch, 'maxLevel': cmax,
+        'tileSize': TILE, 'tid': tid,
+        'fullWidth': W, 'fullHeight': H, 'capRes': cap_res,
+        'tileMode': 'ondemand',
+    })
+
+    base = os.path.join(args.tiledir, str(tid))
+    if os.path.isdir(base):
+        shutil.rmtree(base, ignore_errors=True)
+    os.makedirs(base, exist_ok=True)
+
+    assoc = dump_assoc(lib, info, args.uploads, tid)
+
+    emit({'event': 'progress', 'pct': 20, 'msg': 'Extracting overview tiles…', 'viewable': False})
+    n, cn, rn = extract_level(lib, info, base, 0, cmax, cw, ch, blank_jpeg)
+
+    # Prefer WSI thumbnail as the overview JPEG (navigator), not the cassette photo.
+    if args.uploads:
+        thumb_src = assoc.get('thumbnail')
+        overview_dest = os.path.join(args.uploads, 'overviews', f'{tid}.jpg')
+        if thumb_src and thumb_src.lower().endswith('.jpg') and os.path.exists(thumb_src):
+            os.makedirs(os.path.dirname(overview_dest), exist_ok=True)
+            shutil.copyfile(thumb_src, overview_dest)
+            assoc['overview'] = overview_dest
+
+    meta = {
+        'width': cw, 'height': ch, 'maxLevel': cmax,
+        'tileSize': TILE, 'nTiles': n, 'tid': tid,
+        'fullWidth': W, 'fullHeight': H, 'capRes': cap_res,
+        'tile_mode': 'ondemand', 'source': 'kfb',
+        'offsetX': 0, 'offsetY': 0,
+        'assoc': {k: os.path.basename(v) for k, v in assoc.items()},
+    }
+    write_pyramid_json(base, meta)
+    emit({
+        'event': 'progress', 'pct': 90,
+        'msg': f'Preview ready (level 0 grid={cn}x{rn})',
+        'viewable': True, 'level': 0, 'maxLevel': cmax,
+    })
+    emit(meta)
+    return meta
+
+
+def run_full(lib, info, args, W, H, cap_res, blank_jpeg):
+    if args.crop_content:
+        cw, ch, boxC, boxR, crop = scan_content_bbox(lib, info, W, H)
+    else:
+        cw, ch, boxC, boxR, crop = W, H, 0, 0, None
+
+    cmax = calc_max_level(cw, ch)
+    if args.maxlevel is not None:
+        cmax = min(cmax, args.maxlevel)
+
+    emit({
+        'event': 'header',
+        'width': cw, 'height': ch, 'maxLevel': cmax,
+        'tileSize': TILE, 'tid': args.tid,
+        'fullWidth': W, 'fullHeight': H, 'capRes': cap_res,
+    })
+
+    dump_assoc(lib, info, args.uploads, args.tid)
+
+    base = os.path.join(args.tiledir, str(args.tid))
+    if os.path.isdir(base):
+        shutil.rmtree(base, ignore_errors=True)
+    os.makedirs(base, exist_ok=True)
+
+    total = 0
+    for lv in range(cmax + 1):
+        n, cn, rn = extract_level(lib, info, base, lv, cmax, cw, ch, blank_jpeg, crop, boxC, boxR)
+        total += n
+        pct = 10 + int(80 * (lv + 1) / (cmax + 1))
+        emit({
+            'event': 'progress',
+            'pct': pct,
+            'msg': f'level {lv}/{cmax} grid={cn}x{rn}',
+            'viewable': True,
+            'level': lv,
+            'maxLevel': cmax,
+        })
+
+    meta = {
+        'width': cw, 'height': ch, 'maxLevel': cmax,
+        'offsetX': boxC * TILE, 'offsetY': boxR * TILE,
+        'tileSize': TILE, 'nTiles': total, 'tid': args.tid,
+        'fullWidth': W, 'fullHeight': H, 'capRes': cap_res,
+        'tile_mode': 'prebuilt', 'source': 'kfb',
+    }
+    write_pyramid_json(base, meta)
+    emit(meta)
+
+
+def serve_loop(args):
+    blank_jpeg = load_blank(args.blank)
+    lib = load_lib(args.dll)
+    state = {
+        'info': None,
+        'path': None,
+        'W': 0, 'H': 0, 'cmax': 0, 'cap_res': 0,
+    }
+
+    def close_current():
+        if state['info'] is not None:
+            try:
+                lib.UnInitImageFileFunc(ctypes.byref(state['info']))
+            except Exception:
+                pass
+            state['info'] = None
+            state['path'] = None
+
+    def open_file(kfb_path):
+        close_current()
+        info = ImageInfoStruct()
+        if lib.InitImageFileFunc(ctypes.byref(info), kfb_path.encode()) != 1:
+            raise RuntimeError('InitImageFileFunc failed: ' + kfb_path)
+        W, H, _bs, cap_res, _scan = header(lib, info)
+        state['info'] = info
+        state['path'] = kfb_path
+        state['W'] = W
+        state['H'] = H
+        state['cmax'] = calc_max_level(W, H)
+        state['cap_res'] = cap_res
+        return W, H, state['cmax'], cap_res
+
+    emit({'event': 'ready', 'mode': 'serve'})
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except Exception as e:
+            emit({'ok': False, 'error': f'bad json: {e}'})
+            continue
+        cmd = msg.get('cmd')
+        rid = msg.get('id')
+        try:
+            if cmd == 'open':
+                W, H, cmax, cap_res = open_file(msg['path'])
+                emit({'ok': True, 'id': rid, 'width': W, 'height': H,
+                      'maxLevel': cmax, 'capRes': cap_res})
+            elif cmd == 'tile':
+                if state['info'] is None:
+                    raise RuntimeError('no file open')
+                lv = int(msg['level'])
+                col = int(msg['col'])
+                row = int(msg['row'])
+                out = msg['out']
+                cmax = state['cmax']
+                d = 2 ** (cmax - lv)
+                fs = 1.0 / d
+                jpg = fetch_tile(lib, state['info'], fs, col, row) or blank_jpeg
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with open(out, 'wb') as f:
+                    f.write(jpg)
+                emit({'ok': True, 'id': rid, 'bytes': len(jpg)})
+            elif cmd == 'assoc':
+                if state['info'] is None:
+                    raise RuntimeError('no file open')
+                kind = msg.get('kind')
+                out = msg['out']
+                buf = fetch_assoc(lib, state['info'], kind)
+                if not buf:
+                    emit({'ok': False, 'id': rid, 'error': f'no {kind} image'})
+                    continue
+                written = save_assoc_bytes(buf, out)
+                emit({'ok': True, 'id': rid, 'path': written, 'bytes': len(buf)})
+            elif cmd == 'quit':
+                emit({'ok': True, 'id': rid})
+                break
+            else:
+                emit({'ok': False, 'id': rid, 'error': f'unknown cmd {cmd}'})
+        except Exception as e:
+            emit({'ok': False, 'id': rid, 'error': str(e)})
+    close_current()
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--kfb', required=True)
-    ap.add_argument('--tid', required=True)
-    ap.add_argument('--tiledir', required=True)
+    ap.add_argument('--kfb', default=None)
+    ap.add_argument('--tid', default=None)
+    ap.add_argument('--tiledir', default=None)
     ap.add_argument('--dll', default=DLL_DEFAULT)
     ap.add_argument('--blank', default=BLANK_DEFAULT)
     ap.add_argument('--maxlevel', type=int, default=None)
     ap.add_argument('--crop-content', action='store_true',
                     help='Scan every full-res block for a content bbox (slow, usually unnecessary)')
+    ap.add_argument('--preview', action='store_true',
+                    help='Associated images + coarsest level only; tiles generated on demand')
+    ap.add_argument('--serve', action='store_true',
+                    help='JSON-line worker: keep the KFB open for on-demand tiles')
+    ap.add_argument('--uploads', default=None,
+                    help='Repo uploads/ dir for thumbnails, labels, macros, overviews')
     args = ap.parse_args()
+
+    if args.serve:
+        serve_loop(args)
+        return
+
+    if not args.kfb or not args.tid or not args.tiledir:
+        ap.error('--kfb, --tid and --tiledir are required unless --serve')
 
     blank_jpeg = load_blank(args.blank)
     lib = load_lib(args.dll)
@@ -192,69 +526,12 @@ def main():
     if lib.InitImageFileFunc(ctypes.byref(info), args.kfb.encode()) != 1:
         raise RuntimeError('InitImageFileFunc failed: ' + args.kfb)
     try:
-        W, H, _bs, cap_res, scan_scale = header(lib, info)
+        W, H, _bs, cap_res, _scan_scale = header(lib, info)
         emit({'event': 'progress', 'pct': 5, 'msg': f'Opened KFB {W}x{H}'})
-
-        if args.crop_content:
-            cw, ch, boxC, boxR, crop = scan_content_bbox(lib, info, W, H)
+        if args.preview:
+            run_preview(lib, info, args, W, H, cap_res, blank_jpeg)
         else:
-            cw, ch, boxC, boxR, crop = W, H, 0, 0, None
-
-        cmax = calc_max_level(cw, ch)
-        if args.maxlevel is not None:
-            cmax = min(cmax, args.maxlevel)
-
-        emit({
-            'event': 'header',
-            'width': cw, 'height': ch, 'maxLevel': cmax,
-            'tileSize': TILE, 'tid': args.tid,
-            'fullWidth': W, 'fullHeight': H, 'capRes': cap_res,
-            'scanScale': scan_scale,
-        })
-
-        base = os.path.join(args.tiledir, str(args.tid))
-        if os.path.isdir(base):
-            shutil.rmtree(base, ignore_errors=True)
-        os.makedirs(base, exist_ok=True)
-
-        # Server convention: level 0 = lowest resolution, cmax = full resolution.
-        # Generate coarse → fine so the viewer can open as soon as level 0 exists.
-        total = 0
-        for lv in range(cmax + 1):
-            d = 2 ** (cmax - lv)
-            fs = 1.0 / d
-            cn = math.ceil(cw / (TILE * d))
-            rn = math.ceil(ch / (TILE * d))
-            dd = os.path.join(base, str(lv))
-            os.makedirs(dd, exist_ok=True)
-            for r in range(rn):
-                for c in range(cn):
-                    if fs >= 0.999 and crop is not None:
-                        jpg = fetch_tile(lib, info, 1.0, boxC + c, boxR + r)
-                    else:
-                        jpg = fetch_tile(lib, info, fs, c, r)
-                    if not jpg:
-                        jpg = blank_jpeg
-                    with open(os.path.join(dd, f'{c}_{r}.jpg'), 'wb') as f:
-                        f.write(jpg)
-                    total += 1
-            pct = 10 + int(80 * (lv + 1) / (cmax + 1))
-            viewable = lv >= 0
-            emit({
-                'event': 'progress',
-                'pct': pct,
-                'msg': f'level {lv}/{cmax} grid={cn}x{rn}',
-                'viewable': viewable,
-                'level': lv,
-                'maxLevel': cmax,
-            })
-
-        emit({
-            'width': cw, 'height': ch, 'maxLevel': cmax,
-            'offsetX': boxC * TILE, 'offsetY': boxR * TILE,
-            'tileSize': TILE, 'nTiles': total, 'tid': args.tid,
-            'fullWidth': W, 'fullHeight': H, 'capRes': cap_res,
-        })
+            run_full(lib, info, args, W, H, cap_res, blank_jpeg)
     finally:
         lib.UnInitImageFileFunc(ctypes.byref(info))
 
