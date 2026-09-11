@@ -214,8 +214,10 @@ async function finalizeAssocImages(slideId, uploadsDir) {
   }
   if (out.thumbnails) {
     const src = path.join(uploadsDir, 'thumbnails', `${slideId}.jpg`);
+    const tmp = `${src}.tmp.jpg`;
     await sharp(src).resize(400, 400, { fit: 'inside' }).jpeg({ quality: 80 })
-      .toFile(src);
+      .toFile(tmp);
+    await fs.move(tmp, src, { overwrite: true });
   }
   return out;
 }
