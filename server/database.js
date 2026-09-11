@@ -1,8 +1,10 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs');
 const bcrypt = require('bcryptjs');
 
 const DB_PATH = path.join(__dirname, '../data/database.sqlite');
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 let db = null;
 
@@ -107,15 +109,32 @@ function initDatabase() {
           institution: 'TEXT',    // 医疗机构
           microscopic: 'TEXT',    // 镜下所见
           ihc: 'TEXT',            // 免疫组化
-          micro_per_px: 'REAL'    // 微米/像素 (kfb CapRes, 用于尺标/倍率)
+          micro_per_px: 'REAL',   // 微米/像素 (kfb CapRes, 用于尺标/倍率)
+          gender: 'TEXT',
+          age: 'TEXT',
+          diagnosis: 'TEXT',
+          other_info: 'TEXT',
+          processing_progress: 'INTEGER DEFAULT 0',
+          processing_message: 'TEXT',
+          error_message: 'TEXT',
+          tiles_version: 'INTEGER DEFAULT 1',
+          pyramid_complete: 'INTEGER DEFAULT 0'
         };
         try {
           const cols = await query(`PRAGMA table_info(slides)`);
+          const hadPyramidCol = cols.some(c => c.name === 'pyramid_complete');
           for (const [name, type] of Object.entries(caseColumns)) {
             if (!cols.some(c => c.name === name)) {
               await run(`ALTER TABLE slides ADD COLUMN ${name} ${type}`);
               console.log(`Migration: added ${name} column to slides`);
             }
+          }
+          // One-shot: slides that were already ready before this column existed
+          // already have a full pyramid on disk. Do not rerun on later boots —
+          // that would mark an in-flight coarse-first pyramid as complete.
+          if (!hadPyramidCol) {
+            await run(`UPDATE slides SET pyramid_complete = 1 WHERE status = 'ready'`);
+            console.log('Migration: marked existing ready slides pyramid_complete=1');
           }
         } catch (e) {
           console.error('Migration failed (case columns):', e.message);

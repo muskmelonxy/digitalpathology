@@ -44,14 +44,15 @@ router.post('/', authenticateToken, requireRole('teacher', 'admin'), upload.sing
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const { name, description, course_id, tile_size = 256 } = req.body;
+    const { name, description, course_id, tile_size = 256, gender, age, diagnosis, other_info } = req.body;
     const fileExt = path.extname(req.file.originalname).toLowerCase();
     const originalFormat = fileExt.replace('.', '');
 
     // Create database entry
     const result = await run(
-      `INSERT INTO slides (name, description, filename, original_format, course_id, uploaded_by, tile_size, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO slides (name, description, filename, original_format, course_id, uploaded_by, tile_size, status,
+         gender, age, diagnosis, other_info, processing_progress, processing_message)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
       [
         name || req.file.originalname,
         description || '',
@@ -60,7 +61,14 @@ router.post('/', authenticateToken, requireRole('teacher', 'admin'), upload.sing
         course_id || null,
         req.user.id,
         parseInt(tile_size) || 256,
-        'processing'
+        'processing',
+        gender || '',
+        age || '',
+        diagnosis || '',
+        other_info || '',
+        originalFormat === 'kfb' || originalFormat === 'kfbio'
+          ? 'Queued — native KFB decode'
+          : 'Queued — building pyramid'
       ]
     );
 
@@ -86,7 +94,12 @@ router.post('/', authenticateToken, requireRole('teacher', 'admin'), upload.sing
 // Get upload status
 router.get('/status/:id', authenticateToken, async (req, res) => {
   try {
-    const slide = await get('SELECT id, status, name FROM slides WHERE id = ?', [req.params.id]);
+    const slide = await get(
+      `SELECT id, status, name, original_format, processing_progress, processing_message,
+              error_message, pyramid_complete, tiles_version, width, height, max_level
+       FROM slides WHERE id = ?`,
+      [req.params.id]
+    );
     if (!slide) {
       return res.status(404).json({ error: 'Slide not found' });
     }

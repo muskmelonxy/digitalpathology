@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery } from 'react-query';
 import axios from 'axios';
-import OpenSeadragon from 'openseadragon';
 import { useAuth } from '../contexts/AuthContext';
 import {
   ArrowLeft,
@@ -14,11 +13,18 @@ import {
   Maximize,
   Minimize
 } from 'lucide-react';
-import toast from 'react-hot-toast';
 import ShareModal from '../components/ShareModal';
 import ZoomControls from '../components/ZoomControls';
 import ColorAdjust, { defaultColor, applyColorToViewer } from '../components/ColorAdjust';
 import ScaleBar from '../components/ScaleBar';
+import {
+  buildTileSource,
+  buildOsdOptions,
+  applyViewportHash,
+  bindViewportHash,
+  placeholderStyle
+} from '../lib/osdConfig';
+import OpenSeadragon from 'openseadragon';
 
 export default function SlideViewer() {
   const { id } = useParams();
@@ -34,22 +40,29 @@ export default function SlideViewer() {
   const [color, setColor] = useState(defaultColor);
   const colorRef = useRef(defaultColor);
   const [osdReady, setOsdReady] = useState(false);
-  const { user, token } = useAuth();
+  const { user } = useAuth();
 
   const { data: slide, isLoading: slideLoading } = useQuery(
     ['slide', id],
     () => axios.get(`/api/slides/${id}`).then(res => res.data),
-    { enabled: !!id }
+    {
+      enabled: !!id,
+      refetchInterval: (data) => {
+        if (!data) return 2000;
+        if (data.status === 'processing') return 2000;
+        if (data.status === 'ready' && Number(data.pyramid_complete) === 0) return 5000;
+        return false;
+      }
+    }
   );
 
   const { data: slideInfo, isLoading: infoLoading } = useQuery(
     ['slideInfo', id],
     () => axios.get(`/api/slides/${id}/info`).then(res => res.data),
-    { enabled: !!id }
+    { enabled: !!id && slide?.status === 'ready' }
   );
 
-  // Prefetch the crisp whole-slide overview; use it as the first-paint
-  // placeholder if it exists, else fall back to the small thumbnail.
+  // Prefetch overview for CSS first-paint only — do NOT rebuild OpenSeadragon when it arrives.
   useEffect(() => {
     if (!id) return;
     setOverviewOk(false);
@@ -66,95 +79,27 @@ export default function SlideViewer() {
   useEffect(() => {
     if (!slideInfo || !viewerRef.current) return;
 
-    console.log('SlideViewer: Initializing with slideInfo:', slideInfo);
-
-    // Clean up previous viewer
     if (osdRef.current) {
       osdRef.current.destroy();
+      osdRef.current = null;
     }
 
-    // Custom tile source for our pyramid structure using STATIC path (fast)
-    //
-    // Server pyramid: level 0 = lowest resolution, maxLevel = full resolution.
-    // OpenSeadragon convention: level 0 = FULL resolution, higher = lower.
-    // We invert the mapping (getTileUrl + getLevelScale) so OSD loads the
-    // low-res overview first, then progressively refines local regions on
-    // zoom — the standard deep-zoom behavior for whole-slide images.
-    const maxLevel = slideInfo.maxLevel;
-    const tileSource = {
+    const tileSource = buildTileSource({
+      id,
       width: slideInfo.width,
       height: slideInfo.height,
       tileSize: slideInfo.tileSize,
-      minLevel: 0,
-      maxLevel: maxLevel,
-      getLevelScale: function(level) {
-        // OSD convention: level 0 = full resolution, each level halves it
-        return 1 / Math.pow(2, level);
-      },
-      getNumTiles: function(level) {
-        const scale = Math.pow(2, level);
-        return {
-          x: Math.max(1, Math.ceil(slideInfo.width / scale / slideInfo.tileSize)),
-          y: Math.max(1, Math.ceil(slideInfo.height / scale / slideInfo.tileSize))
-        };
-      },
-      getTileUrl: function(level, x, y) {
-        // Use direct static file path - no auth overhead, cached for 7 days
-        const serverLevel = maxLevel - level;
-        // 缓存失效版本号: 重新生成瓦片后递增, 浏览器不再复用旧缓存瓦片
-        return `/tiles/${id}/${serverLevel}/${x}_${y}.jpg?v=20260825`;
-      }
-    };
-
-    osdRef.current = OpenSeadragon({
-      element: viewerRef.current,
-      prefixUrl: 'https://cdn.jsdelivr.net/npm/openseadragon@4.1.0/build/openseadragon/images/',
-      showNavigationControl: false,
-      maxZoomPixelRatio: 20,        // allow deep digital zoom (no hard 2x cap on native px)
-      minZoomLevel: 0.1,
-      visibilityRatio: 0.5,
-      constrainDuringPan: true,
-      // ---- Performance tuning for progressive deep-zoom ----
-      animationTime: 0.25,          // snappier pan/zoom response
-      springStiffness: 8,
-      imageLoaderLimit: 24,          // more parallel tile fetches (12-core server)
-      timeout: 15000,
-      tileRetry: 3,                  // retry transient tile failures
-      maxImageCacheCount: 500,       // keep more tiles cached (fast zoom-out)
-      preload: true,                 // prefetch adjacent tiles while panning
-      blendTime: 0.05,               // quick tile fade-in (less "fuzzy" wait)
-      placeholder: placeholderSrc, // instant low-res first paint (crisp overview)
-      gestureSettingsMouse: {
-        clickToZoom: true,
-        dblClickToZoom: true,
-        pinchToZoom: true,
-        scrollToZoom: true
-      },
-      gestureSettingsTouch: {
-        pinchToZoom: true,
-        scrollToZoom: true
-      },
-      // ---- Floating minimap (左上角悬浮总览, 参考站观感) ----
-      showNavigator: true,
-      navigatorPosition: 'TOP_LEFT',
-      navigatorSizeRatio: 0.16,
-      navigatorAutoResize: true
+      maxLevel: slideInfo.maxLevel,
+      tilesVersion: slideInfo.tilesVersion || 1
     });
 
-    // Open the tile source explicitly
+    osdRef.current = OpenSeadragon(buildOsdOptions(viewerRef.current));
     osdRef.current.open(tileSource);
 
-    // Handle tile load errors
     osdRef.current.addHandler('tile-load-failed', (event) => {
-      console.error('Tile load failed:', event);
+      console.warn('Tile load failed:', event?.tile?.url || event);
     });
 
-    // Handle open errors
-    osdRef.current.addHandler('open-failed', (event) => {
-      console.error('Open failed:', event);
-    });
-
-    // Track zoom changes (as a multiple of the whole-slide/home view)
     osdRef.current.addHandler('zoom', () => {
       const z = osdRef.current.viewport.getZoom();
       setCurrentZoom(z);
@@ -162,24 +107,33 @@ export default function SlideViewer() {
       if (hz) setMultiple(Math.round((z / hz) * 100) / 100);
     });
 
-    // Capture the whole-slide (home) zoom as the 1x baseline for presets/slider
+    let unbindHash = () => {};
     osdRef.current.addHandler('open', () => {
       const hz = osdRef.current.viewport.getZoom();
       homeZoomRef.current = hz;
       setCurrentZoom(hz);
       setMultiple(1);
       applyColorToViewer(osdRef.current, colorRef.current);
+      const usedHash = applyViewportHash(osdRef.current);
+      unbindHash = bindViewportHash(osdRef.current);
+      if (usedHash) {
+        const z = osdRef.current.viewport.getZoom();
+        setCurrentZoom(z);
+        setMultiple(Math.round((z / hz) * 100) / 100);
+      }
       setOsdReady(true);
-      console.log('SlideViewer: OpenSeadragon viewer ready, home zoom', hz);
     });
 
     return () => {
+      unbindHash();
       if (osdRef.current) {
         osdRef.current.destroy();
         osdRef.current = null;
       }
     };
-  }, [slideInfo, slide, id, token, overviewOk]);
+    // Intentionally omit overviewOk / slide / token — rebuilding OSD on overview
+    // load was resetting the viewport and refetching every tile.
+  }, [slideInfo, id]);
 
   // Apply color adjustments live (brightness/contrast/gamma/grayscale/invert)
   useEffect(() => {
@@ -215,7 +169,7 @@ export default function SlideViewer() {
     }
   };
 
-  if (slideLoading || infoLoading) {
+  if (slideLoading) {
     return (
       <div className="flex items-center justify-center h-[calc(100vh-200px)]">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
@@ -223,7 +177,7 @@ export default function SlideViewer() {
     );
   }
 
-  if (!slide || !slideInfo) {
+  if (!slide) {
     return (
       <div className="text-center py-16">
         <h2 className="text-xl font-medium text-gray-900">Slide not found</h2>
@@ -234,14 +188,40 @@ export default function SlideViewer() {
     );
   }
 
-  if (slide.status !== 'ready') {
+  if (slide.status === 'error') {
     return (
-      <div className="text-center py-16">
-        <h2 className="text-xl font-medium text-gray-900">Slide not ready</h2>
-        <p className="text-gray-600 mt-2">This slide is still being processed</p>
+      <div className="text-center py-16 max-w-lg mx-auto">
+        <h2 className="text-xl font-medium text-gray-900">Processing failed</h2>
+        <p className="text-gray-600 mt-2 whitespace-pre-wrap">{slide.error_message || slide.processing_message || 'This slide could not be converted.'}</p>
         <Link to="/slides" className="btn-primary inline-block mt-4">
           Back to Slides
         </Link>
+      </div>
+    );
+  }
+
+  if (slide.status !== 'ready') {
+    const pct = Number(slide.processing_progress) || 0;
+    return (
+      <div className="text-center py-16 max-w-lg mx-auto">
+        <h2 className="text-xl font-medium text-gray-900">Preparing slide</h2>
+        <p className="text-gray-600 mt-2">{slide.processing_message || 'Building deep-zoom tiles…'}</p>
+        <div className="mt-6 h-2 bg-gray-200 rounded-full overflow-hidden">
+          <div className="h-full bg-blue-600 transition-all" style={{ width: `${pct}%` }} />
+        </div>
+        <p className="text-sm text-gray-500 mt-2">{pct}%</p>
+        <p className="text-xs text-gray-400 mt-4">The viewer will open as soon as the overview pyramid is ready.</p>
+        <Link to="/slides" className="btn-secondary inline-block mt-4">
+          Back to Slides
+        </Link>
+      </div>
+    );
+  }
+
+  if (infoLoading || !slideInfo) {
+    return (
+      <div className="flex items-center justify-center h-[calc(100vh-200px)]">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
       </div>
     );
   }
@@ -285,7 +265,13 @@ export default function SlideViewer() {
       <div className="flex-1 flex gap-4 overflow-hidden">
         {/* Viewer */}
         <div className="flex-1 relative bg-gray-900 rounded-lg overflow-hidden">
-          <div ref={viewerRef} className="w-full h-full" />
+          <div ref={viewerRef} className="w-full h-full" style={placeholderStyle(placeholderSrc)} />
+
+          {Number(slide.pyramid_complete) === 0 && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-amber-100/95 text-amber-900 text-xs font-medium px-3 py-1.5 rounded-full shadow">
+              Higher magnification still generating…
+            </div>
+          )}
 
           {/* Controls Overlay */}
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-white/90 backdrop-blur rounded-lg shadow-lg p-2">

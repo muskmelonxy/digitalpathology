@@ -5,6 +5,8 @@ client/node_modules/
 # Uploads and data (user content)
 uploads/slides/*
 uploads/tiles/*
+uploads/overviews/*
+!uploads/overviews/.gitkeep
 uploads/temp/*
 uploads/thumbnails/*
 !uploads/slides/.gitkeep

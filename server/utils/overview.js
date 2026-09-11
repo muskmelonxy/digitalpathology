@@ -10,22 +10,24 @@ const OVERVIEW_DIR = path.join(__dirname, '../../uploads/overviews');
 const TARGET_W = 1600;
 const JPEG_QUALITY = 85;
 
-async function ensureOverview(slide) {
+async function ensureOverview(slide, { force = false } = {}) {
   if (!slide || slide.status !== 'ready') return null;
   const outPath = path.join(OVERVIEW_DIR, `${slide.id}.jpg`);
-  if (fs.existsSync(outPath)) return `/uploads/overviews/${slide.id}.jpg`;
+  if (!force && fs.existsSync(outPath)) return `/uploads/overviews/${slide.id}.jpg`;
 
   const tilesBase = path.join(__dirname, '../../uploads/tiles', String(slide.id));
   const { width, height, max_level: maxLevel, tile_size: tileSize } = slide;
   if (!width || !height || maxLevel == null) return null;
 
-  // 选宽度最接近 TARGET_W 的层级 L
-  let bestL = 0, bestDiff = Infinity;
+  let bestL = null, bestDiff = Infinity;
   for (let l = 0; l <= maxLevel; l++) {
+    const levelDir = path.join(tilesBase, String(l));
+    if (!fs.existsSync(levelDir)) continue;
     const levelW = Math.ceil(width / Math.pow(2, maxLevel - l));
     const diff = Math.abs(levelW - TARGET_W);
     if (diff < bestDiff) { bestDiff = diff; bestL = l; }
   }
+  if (bestL == null) return null;
 
   const scale = Math.pow(2, maxLevel - bestL);
   const levelW = Math.ceil(width / scale);

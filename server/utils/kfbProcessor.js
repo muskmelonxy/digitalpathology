@@ -1,62 +1,138 @@
 /**
- * kfbProcessor.js — 用官方 KFBIO 解码库把 .kfb 转成标准金字塔
- * 取代旧 kfbioParser(只抽低清预览)。依赖:
- *   - server/utils/kfb_extract.py      (ctypes 调用解码器)
- *   - vendor/lib/libImageOperationLib.so (KFB_Convert_TIFF 项目自带厂商库)
- *   - vendor/blank_256.jpg             (背景瓦片占位)
+ * kfbProcessor.js — official KFBIO decoder → standard pyramid
+ * Depends on:
+ *   - server/utils/kfb_extract.py
+ *   - vendor/lib/libImageOperationLib.so
+ *   - vendor/lib/libjpeg.so.9  (or system libjpeg.so.9)
+ *   - vendor/blank_256.jpg
  */
-const { execFile } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs-extra');
 const sharp = require('sharp');
+const { resolveVendorPaths, kfbChildEnv, checkKfbRuntime } = require('./vendorPaths');
 
-// 用系统 python(无 miniforge conda 插件日志噪音)。kfb_extract 只用 ctypes+stdlib。
 const PYTHON = process.env.PFB_PYTHON || '/usr/bin/python3';
 const SCRIPT = path.join(__dirname, 'kfb_extract.py');
+const DEFAULT_TIMEOUT_MS = Number(process.env.KFB_TIMEOUT_MS || 30 * 60 * 1000);
 
-/** 运行转换器, 返回捕获的 JSON(丢弃 conda 插件噪音) */
-function runConverter(args) {
+function parseJsonLine(line) {
+  const t = String(line || '').trim();
+  if (!t.startsWith('{')) return null;
+  try {
+    return JSON.parse(t);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Spawn the Python converter and stream JSON progress lines.
+ * @param {string[]} args
+ * @param {{onProgress?: Function}} opts
+ * @returns {Promise<object>} final metadata JSON
+ */
+function runConverter(args, opts = {}) {
+  const { onProgress } = opts;
+  const timeoutMs = Number(opts.timeoutMs || DEFAULT_TIMEOUT_MS);
+
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, CONDA_NO_PLUGINS: 'true' };
-    execFile(PYTHON, args, { env, maxBuffer: 32 * 1024 * 1024, timeout: 900000 }, (err, stdout, stderr) => {
-      if (err) {
-        console.error('[kfb] converter 退出错误:', String(stderr || err.message || '').slice(-1500));
-        return reject(new Error('kfb 转换失败'));
+    const env = kfbChildEnv();
+    const child = spawn(PYTHON, args, { env });
+    let stdoutBuf = '';
+    let stderrBuf = '';
+    let meta = null;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch (e) {}
+      fail(new Error(`kfb converter timed out after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const tail = String(stderrBuf || err.message || '').slice(-2000);
+      reject(new Error(err.message + (tail && tail !== err.message ? `\n${tail}` : '')));
+    };
+
+    const succeed = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+
+    const consumeLine = (line) => {
+      const obj = parseJsonLine(line);
+      if (!obj) return;
+      if (obj.event === 'progress' || obj.event === 'header') {
+        if (onProgress) {
+          try { onProgress(obj); } catch (e) { /* ignore UI progress errors */ }
+        }
+        return;
       }
-      const lines = String(stdout).trim().split('\n');
-      const jsonLine = lines.filter(l => l.trim().startsWith('{')).pop();
-      if (!jsonLine) {
-        console.error('[kfb] 无结构化输出:', String(stdout).slice(-500));
-        return reject(new Error('kfb 转换器未返回元数据'));
+      if (obj.event === 'error') {
+        fail(new Error(obj.msg || 'kfb converter error'));
+        return;
       }
-      try {
-        resolve(JSON.parse(jsonLine));
-      } catch (e) {
-        return reject(new Error('kfb 输出 JSON 解析失败'));
+      if (obj.event === 'warn') {
+        console.warn('[kfb]', obj.msg);
+        return;
       }
+      if (obj.width && obj.maxLevel != null && obj.event == null) {
+        meta = obj;
+      }
+    };
+
+    child.stdout.on('data', (buf) => {
+      stdoutBuf += buf.toString('utf8');
+      const lines = stdoutBuf.split('\n');
+      stdoutBuf = lines.pop();
+      for (const line of lines) consumeLine(line);
+    });
+    child.stderr.on('data', (buf) => {
+      stderrBuf += buf.toString('utf8');
+      if (stderrBuf.length > 64 * 1024) {
+        stderrBuf = stderrBuf.slice(-32 * 1024);
+      }
+    });
+    child.on('error', (err) => {
+      fail(new Error(`failed to start ${PYTHON}: ${err.message}`));
+    });
+    child.on('close', (code) => {
+      if (stdoutBuf.trim()) consumeLine(stdoutBuf);
+      if (settled) return;
+      if (code !== 0) {
+        return fail(new Error(`kfb converter exited ${code}`));
+      }
+      if (!meta) {
+        return fail(new Error('kfb converter returned no metadata JSON'));
+      }
+      succeed(meta);
     });
   });
 }
 
-/**
- * 把某个 level 的瓦片合成一张缩略图(jpeg, 最长边 ≤400)。
- * tilesDir      = <uploads>/tiles/<slideId>
- * thumbDir      = <uploads>/thumbnails
- */
 async function makeThumbnail(meta, slideId, tilesDir, thumbDir) {
   try {
-    // 选宽度最接近 400px 的存储层。存储层 l 的 scale=2^(maxLevel-l), 层宽=width/scale。
-    // 故 l ≈ maxLevel - log2(width/400)。
-    const lv = Math.max(0, Math.min(meta.maxLevel,
-      Math.round(meta.maxLevel - Math.log2(meta.width / 400))));
+    const ideal = Math.max(0, Math.min(meta.maxLevel,
+      Math.round(meta.maxLevel - Math.log2(Math.max(meta.width, 1) / 400))));
+    let lv = ideal;
+    if (!fs.existsSync(path.join(tilesDir, String(lv)))) {
+      const existing = (await fs.readdir(tilesDir)).filter(n => /^\d+$/.test(n)).map(Number).sort((a, b) => a - b);
+      if (!existing.length) return null;
+      lv = existing.reduce((best, n) => Math.abs(n - ideal) < Math.abs(best - ideal) ? n : best, existing[0]);
+    }
     const dir = path.join(tilesDir, String(lv));
-    if (!fs.existsSync(dir)) return;
+    if (!fs.existsSync(dir)) return null;
     const files = (await fs.readdir(dir)).filter(f => /^\d+_\d+\.jpg$/.test(f));
     const coords = files.map(f => {
       const m = f.match(/^(\d+)_(\d+)\.jpg$/);
       return { c: +m[1], r: +m[2], file: path.join(dir, f) };
     });
-    if (!coords.length) return;
+    if (!coords.length) return null;
     const ncols = Math.max(...coords.map(x => x.c)) + 1;
     const nrows = Math.max(...coords.map(x => x.r)) + 1;
     const W = 256 * ncols, H = 256 * nrows;
@@ -68,72 +144,53 @@ async function makeThumbnail(meta, slideId, tilesDir, thumbDir) {
       create: { width: W, height: H, channels: 3, background: { r: 245, g: 245, b: 245 } }
     }).composite(layers).jpeg({ quality: 80 }).toBuffer();
     await fs.ensureDir(thumbDir);
-    await sharp(canvas).resize(400, 400, { fit: 'inside' }).jpeg({ quality: 80 })
-      .toFile(path.join(thumbDir, `${slideId}.jpg`));
+    const out = path.join(thumbDir, `${slideId}.jpg`);
+    await sharp(canvas).resize(400, 400, { fit: 'inside' }).jpeg({ quality: 80 }).toFile(out);
+    return `/uploads/thumbnails/${slideId}.jpg`;
   } catch (e) {
-    console.error(`[kfb] 缩略图生成失败 slide ${slideId}:`, e.message);
+    console.error(`[kfb] thumbnail failed slide ${slideId}:`, e.message);
+    return null;
   }
 }
 
-/**
- * 自底向上合成粗层级(level maxLevel-1 .. 0)。
- * 全分辨率瓦片已由 kfb_extract 解码到 level maxLevel。每个粗层瓦片 = 取其父层
- * 2x2 相邻瓦片拼成 512x512 后缩到 256(area 平均 = 正确金字塔下采样), 保证各层对齐。
- * @param tilesDir  <uploads>/tiles/<slideId>
- * @param meta      {width,height,maxLevel}
- */
-async function buildCoarsePyramid(tilesDir, meta) {
-  const { width, height, maxLevel } = meta;
-  const blank = await fs.readFile('/www/digitalpathology/vendor/blank_256.jpg'); // JPEG 直接给 sharp 解码
-  let cols = Math.ceil(width / 256);
-  let rows = Math.ceil(height / 256);
-  let parentDir = path.join(tilesDir, String(maxLevel));
-
-  for (let lv = maxLevel - 1; lv >= 0; lv--) {
-    const newCols = Math.ceil(cols / 2);
-    const newRows = Math.ceil(rows / 2);
-    const dir = path.join(tilesDir, String(lv));
-    await fs.ensureDir(dir);
-
-    for (let r = 0; r < newRows; r++) {
-      for (let c = 0; c < newCols; c++) {
-        const layers = [];
-        for (let dy = 0; dy < 2; dy++) {
-          for (let dx = 0; dx < 2; dx++) {
-            const pc = c * 2 + dx, pr = r * 2 + dy;
-            if (pc >= cols || pr >= rows) continue;
-            const p = path.join(parentDir, `${pc}_${pr}.jpg`);
-            let buf = null;
-            try { buf = await fs.readFile(p); } catch (e) { buf = null; }
-            if (!buf || buf.length === 0) buf = blank;
-            layers.push({ input: buf, left: dx * 256, top: dy * 256 });
-          }
-        }
-        const tile = await sharp({
-          create: { width: 512, height: 512, channels: 3, background: { r: 245, g: 245, b: 245 } }
-        }).composite(layers).resize(256, 256).jpeg({ quality: 80 }).toBuffer();
-        await fs.writeFile(path.join(dir, `${c}_${r}.jpg`), tile);
-      }
-      if (r % 8 === 0) console.log(`  [coarse] level ${lv} 行 ${r + 1}/${newRows}`);
-    }
-    cols = newCols; rows = newRows; parentDir = dir;
+async function processKFB(slideId, filePath, uploadsDir, opts = {}) {
+  const runtime = checkKfbRuntime();
+  if (!runtime.ok) {
+    throw new Error(`KFB runtime not ready: ${runtime.problems.join('; ')}`);
   }
-}
-
-/**
- * 主入口: 解码全分辨率瓦片 + 自底向上合成粗层 + 生成缩略图。
- * @returns {{width,height,maxLevel,tileSize,slidesDir}}  slidesDir=<uploads>/tiles
- */
-async function processKFB(slideId, filePath, uploadsDir) {
+  const paths = resolveVendorPaths();
   const tilesRoot = path.join(uploadsDir, 'tiles');
-  const meta = await runConverter([
-    SCRIPT, '--kfb', filePath, '--tid', slideId, '--tiledir', tilesRoot
-  ]);
+  await fs.ensureDir(tilesRoot);
+
+  const args = [
+    SCRIPT,
+    '--kfb', filePath,
+    '--tid', String(slideId),
+    '--tiledir', tilesRoot,
+    '--dll', paths.dll,
+    '--blank', paths.blank
+  ];
+  if (process.env.KFB_CROP_CONTENT === '1') args.push('--crop-content');
+
+  let viewableNotified = false;
+  const meta = await runConverter(args, {
+    onProgress: async (evt) => {
+      if (opts.onProgress) {
+        await opts.onProgress(evt);
+      }
+      if (evt.viewable && !viewableNotified && opts.onViewable) {
+        viewableNotified = true;
+        try { await opts.onViewable(evt); } catch (e) {
+          console.error('[kfb] onViewable failed:', e.message);
+        }
+      }
+    }
+  });
+
   const slideTilesDir = path.join(tilesRoot, String(slideId));
-  // 注意: kfb_extract 现已直接生成全部层级(块索引坐标 + fScale=1/2^lv 原生下采样),
-  // 不再需要自底向上合成 buildCoarsePyramid(旧逻辑基于错误的像素坐标只够单块)。
-  await makeThumbnail(meta, slideId, slideTilesDir, path.join(uploadsDir, 'thumbnails'));
+  const thumb = await makeThumbnail(meta, slideId, slideTilesDir, path.join(uploadsDir, 'thumbnails'));
+  meta.thumbnailPath = thumb;
   return meta;
 }
 
-module.exports = { processKFB, runConverter };
+module.exports = { processKFB, runConverter, makeThumbnail, checkKfbRuntime };

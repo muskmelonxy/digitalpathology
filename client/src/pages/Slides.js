@@ -29,7 +29,15 @@ export default function Slides() {
   const [shareSlideId, setShareSlideId] = useState(null);
 
   const { data: slides, refetch } = useQuery('slides', () =>
-    axios.get('/api/slides').then(res => res.data)
+    axios.get('/api/slides').then(res => res.data),
+    {
+      refetchInterval: (data) => {
+        if (!data) return false;
+        return data.some(s => s.status === 'processing' || Number(s.pyramid_complete) === 0)
+          ? 4000
+          : false;
+      }
+    }
   );
 
   const handleDelete = async (id) => {
@@ -103,15 +111,22 @@ export default function Slides() {
     return matchesSearch && matchesFilter;
   }) || [];
 
-  const getStatusBadge = (status) => {
+  const getStatusBadge = (slide) => {
+    const status = slide.status;
     const styles = {
       ready: 'bg-green-100 text-green-700',
       processing: 'bg-yellow-100 text-yellow-700',
       error: 'bg-red-100 text-red-700'
     };
+    let label = status;
+    if (status === 'ready' && Number(slide.pyramid_complete) === 0) {
+      label = 'sharpening';
+    } else if (status === 'processing' && slide.processing_progress != null) {
+      label = `processing ${slide.processing_progress}%`;
+    }
     return (
       <span className={`px-2 py-1 rounded-full text-xs font-medium ${styles[status] || styles.processing}`}>
-        {status}
+        {label}
       </span>
     );
   };
@@ -209,7 +224,7 @@ export default function Slides() {
                   </Link>
                   <p className="text-sm text-gray-500 mt-1">{slide.course_name || '未分类'}</p>
                   <div className="flex flex-wrap gap-1 mt-2">
-                    {getStatusBadge(slide.status)}
+                    {getStatusBadge(slide)}
                     <ClinicalBadge label="病理号" value={slide.case_no} color="bg-indigo-50 text-indigo-700" />
                     <ClinicalBadge label="取材" value={slide.sampling_site} color="bg-teal-50 text-teal-700" />
                     <ClinicalBadge label="性别" value={slide.gender} color="bg-pink-50 text-pink-700" />
@@ -301,7 +316,7 @@ export default function Slides() {
                       {slide.diagnosis && <span className="text-xs bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded max-w-[120px] truncate" title={slide.diagnosis}>{slide.diagnosis}</span>}
                     </div>
                   </td>
-                  <td className="py-3 px-4">{getStatusBadge(slide.status)}</td>
+                  <td className="py-3 px-4">{getStatusBadge(slide)}</td>
                   <td className="py-3 px-4 text-sm text-gray-600">
                     {new Date(slide.created_at).toLocaleDateString()}
                   </td>

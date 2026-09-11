@@ -9,7 +9,8 @@
     "server": "nodemon server/index.js",
     "client": "cd client && npm start",
     "build": "cd client && npm run build",
-    "install-client": "cd client && npm install"
+    "install-client": "cd client && npm install",
+    "test:viewer": "node scripts/test-pyramid-math.js && node scripts/test-sharp-tile-layout.js && node scripts/check-kfb-runtime.js && node scripts/test-process-slide.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

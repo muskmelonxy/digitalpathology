@@ -10,31 +10,60 @@ const courseRoutes = require('./routes/courses');
 const uploadRoutes = require('./routes/upload');
 const tileRoutes = require('./routes/tiles');
 const shareRoutes = require('./routes/share');
+const systemRoutes = require('./routes/system');
 const { initDatabase } = require('./database');
 const { initAutoImport } = require('./utils/autoImport');
 const { ensureOverview } = require('./utils/overview');
+const { checkKfbRuntime } = require('./utils/kfbProcessor');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+try {
+  const sharp = require('sharp');
+  const cpus = require('os').cpus().length || 2;
+  sharp.concurrency(Math.max(1, cpus - 1));
+  sharp.cache({ memory: 256, files: 20, items: 200 });
+} catch (e) {
+  console.warn('sharp init skipped:', e.message);
+}
 
 // Ensure directories exist
 fs.ensureDirSync(path.join(__dirname, '../uploads/slides'));
 fs.ensureDirSync(path.join(__dirname, '../uploads/tiles'));
 fs.ensureDirSync(path.join(__dirname, '../uploads/thumbnails'));
+fs.ensureDirSync(path.join(__dirname, '../uploads/overviews'));
+fs.ensureDirSync(path.join(__dirname, '../uploads/temp'));
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(cookieParser());
 
-// Static files with caching
+// Static files with caching.
+// fallthrough:false so a missing tile is a real 404 (not the SPA index.html),
+// which otherwise poisons OpenSeadragon's tile cache during pan/zoom.
 app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
   maxAge: '1d',
-  immutable: true
+  immutable: true,
+  index: false,
+  setHeaders(res, filePath) {
+    if (/\.jpe?g$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+    }
+  }
 }));
 app.use('/tiles', express.static(path.join(__dirname, '../uploads/tiles'), {
   maxAge: '7d',
-  immutable: true
+  immutable: true,
+  index: false,
+  fallthrough: false,
+  setHeaders(res, filePath) {
+    if (/\.jpe?g$/i.test(filePath)) {
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    }
+  }
 }));
 
 // API Routes
@@ -44,6 +73,7 @@ app.use('/api/courses', courseRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/tiles', tileRoutes);
 app.use('/api/share', shareRoutes);
+app.use('/api/system', systemRoutes);
 
 // Serve React app in production
 if (process.env.NODE_ENV === 'production') {
@@ -67,6 +97,12 @@ initDatabase().then(() => {
   initAutoImport();
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    const kfb = checkKfbRuntime();
+    if (kfb.ok) {
+      console.log(`[kfb] runtime ok  dll=${kfb.dll}  libjpeg=${kfb.libjpeg9}`);
+    } else {
+      console.warn(`[kfb] runtime NOT ready:\n  - ${kfb.problems.join('\n  - ')}`);
+    }
   });
 
   // Pre-build crisp whole-slide overviews for ready slides (background, non-blocking).

@@ -118,15 +118,29 @@ export default function Upload() {
     const checkStatus = async () => {
       try {
         const response = await axios.get(`/api/upload/status/${slideId}`);
-        const { status } = response.data;
+        const { status, processing_progress, processing_message, error_message, pyramid_complete } = response.data;
 
-        if (status === 'ready') {
-          updateFile(index, { status: 'done' });
+        if (status === 'ready' && Number(pyramid_complete) !== 0) {
+          updateFile(index, { status: 'done', progress: 100, processMessage: 'Ready' });
           queryClient.invalidateQueries('slides');
+        } else if (status === 'ready') {
+          updateFile(index, {
+            status: 'processing',
+            progress: Math.max(Number(processing_progress) || 55, 55),
+            processMessage: processing_message || 'Preview ready — finishing high-res tiles…'
+          });
+          setTimeout(checkStatus, 2000);
         } else if (status === 'error') {
-          updateFile(index, { status: 'error', error: 'Processing failed' });
+          updateFile(index, {
+            status: 'error',
+            error: error_message || processing_message || 'Processing failed'
+          });
         } else {
-          // Still processing, poll again
+          updateFile(index, {
+            status: 'processing',
+            progress: Number(processing_progress) || 0,
+            processMessage: processing_message || 'Processing tiles…'
+          });
           setTimeout(checkStatus, 2000);
         }
       } catch (error) {
@@ -174,12 +188,12 @@ export default function Upload() {
     }
   };
 
-  const getStatusText = (status) => {
-    switch (status) {
+  const getStatusText = (fileObj) => {
+    switch (fileObj.status) {
       case 'uploading':
         return 'Uploading...';
       case 'processing':
-        return 'Processing tiles...';
+        return fileObj.processMessage || 'Processing tiles...';
       case 'done':
         return 'Complete';
       case 'error':
@@ -198,7 +212,7 @@ export default function Upload() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Upload Slides</h1>
           <p className="text-gray-600 mt-1">
-            Upload TIFF, JPEG, PNG, SVS or KFBIO files
+            Upload TIFF, JPEG, PNG, SVS or KFB (.kfb / .kfbio). KFB uses the native decoder — no manual convert step.
           </p>
         </div>
         {doneCount > 0 && (
@@ -227,7 +241,7 @@ export default function Upload() {
         </p>
         <p className="text-gray-500 mt-2">or click to browse</p>
         <p className="text-sm text-gray-400 mt-4">
-          Supported: TIFF, JPEG, PNG, SVS, KFBIO (max 5GB)
+          Supported: TIFF, JPEG, PNG, SVS, KFB/KFBIO (max 5GB). KFB is decoded natively.
         </p>
       </div>
 
@@ -357,7 +371,7 @@ export default function Upload() {
                     {(fileObj.status === 'uploading' || fileObj.status === 'processing') && (
                       <div className="mt-3">
                         <div className="flex items-center justify-between text-sm mb-1">
-                          <span>{getStatusText(fileObj.status)}</span>
+                          <span>{getStatusText(fileObj)}</span>
                           <span>{fileObj.progress}%</span>
                         </div>
                         <div className="h-2 bg-gray-200 rounded-full overflow-hidden">

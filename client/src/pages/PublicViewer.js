@@ -5,6 +5,14 @@ import OpenSeadragon from 'openseadragon';
 import { ZoomIn, ZoomOut, RotateCcw, Info, Maximize, Minimize } from 'lucide-react';
 import ZoomControls from '../components/ZoomControls';
 import ColorAdjust, { defaultColor, applyColorToViewer } from '../components/ColorAdjust';
+import ScaleBar from '../components/ScaleBar';
+import {
+  buildTileSource,
+  buildOsdOptions,
+  applyViewportHash,
+  bindViewportHash,
+  placeholderStyle
+} from '../lib/osdConfig';
 
 // Public read-only slide viewer, opened via a share link (/s/:token).
 // No authentication required — tile + thumbnail assets are served statically.
@@ -22,6 +30,7 @@ export default function PublicViewer() {
   const [overviewOk, setOverviewOk] = useState(false);
   const [color, setColor] = useState(defaultColor);
   const colorRef = useRef(defaultColor);
+  const [osdReady, setOsdReady] = useState(false);
 
   useEffect(() => {
     axios.get(`/api/share/public/${token}`)
@@ -54,64 +63,16 @@ export default function PublicViewer() {
       osdRef.current = null;
     }
 
-    const maxLevel = slide.max_level;
-    const tileSource = {
+    const tileSource = buildTileSource({
+      id: slide.id,
       width: slide.width,
       height: slide.height,
       tileSize: slide.tile_size,
-      minLevel: 0,
-      maxLevel,
-      getLevelScale: function(level) {
-        return 1 / Math.pow(2, level);
-      },
-      getNumTiles: function(level) {
-        const scale = Math.pow(2, level);
-        return {
-          x: Math.max(1, Math.ceil(slide.width / scale / slide.tile_size)),
-          y: Math.max(1, Math.ceil(slide.height / scale / slide.tile_size))
-        };
-      },
-      getTileUrl: function(level, x, y) {
-        const serverLevel = maxLevel - level;
-        // 缓存失效版本号: 瓦片重生成后递增, 避免浏览器复用 7 天 immutable 旧瓦片
-        return `/tiles/${slide.id}/${serverLevel}/${x}_${y}.jpg?v=20260825`;
-      }
-    };
-
-    osdRef.current = OpenSeadragon({
-      element: viewerRef.current,
-      prefixUrl: 'https://cdn.jsdelivr.net/npm/openseadragon@4.1.0/build/openseadragon/images/',
-      showNavigationControl: false,
-      maxZoomPixelRatio: 20,
-      minZoomLevel: 0.1,
-      visibilityRatio: 0.5,
-      constrainDuringPan: true,
-      animationTime: 0.25,
-      springStiffness: 8,
-      imageLoaderLimit: 24,
-      timeout: 15000,
-      tileRetry: 3,
-      maxImageCacheCount: 500,
-      preload: true,
-      blendTime: 0.05,
-      placeholder: placeholderSrc,
-      gestureSettingsMouse: {
-        clickToZoom: true,
-        dblClickToZoom: true,
-        pinchToZoom: true,
-        scrollToZoom: true
-      },
-      gestureSettingsTouch: {
-        pinchToZoom: true,
-        scrollToZoom: true
-      },
-      // ---- Floating minimap (左上角悬浮总览, 随平移缩放自动更新) ----
-      showNavigator: true,
-      navigatorPosition: 'TOP_LEFT',
-      navigatorSizeRatio: 0.16,
-      navigatorAutoResize: true
+      maxLevel: slide.max_level,
+      tilesVersion: slide.tiles_version || 1
     });
 
+    osdRef.current = OpenSeadragon(buildOsdOptions(viewerRef.current));
     osdRef.current.open(tileSource);
 
     osdRef.current.addHandler('zoom', () => {
@@ -121,21 +82,31 @@ export default function PublicViewer() {
       if (hz) setMultiple(Math.round((z / hz) * 100) / 100);
     });
 
+    let unbindHash = () => {};
     osdRef.current.addHandler('open', () => {
       const hz = osdRef.current.viewport.getZoom();
       homeZoomRef.current = hz;
       setCurrentZoom(hz);
       setMultiple(1);
       applyColorToViewer(osdRef.current, colorRef.current);
+      const usedHash = applyViewportHash(osdRef.current);
+      unbindHash = bindViewportHash(osdRef.current);
+      if (usedHash) {
+        const z = osdRef.current.viewport.getZoom();
+        setCurrentZoom(z);
+        setMultiple(Math.round((z / hz) * 100) / 100);
+      }
+      setOsdReady(true);
     });
 
     return () => {
+      unbindHash();
       if (osdRef.current) {
         osdRef.current.destroy();
         osdRef.current = null;
       }
     };
-  }, [slide, overviewOk]);
+  }, [slide]);
 
   // Apply color adjustments live (brightness/contrast/gamma/grayscale/invert)
   useEffect(() => {
@@ -208,7 +179,9 @@ export default function PublicViewer() {
       {/* Viewer area */}
       <div className="h-[calc(100vh-57px)] flex gap-4 p-4 overflow-hidden">
         <div className="flex-1 relative bg-gray-900 rounded-lg overflow-hidden">
-          <div ref={viewerRef} className="w-full h-full" />
+          <div ref={viewerRef} className="w-full h-full" style={placeholderStyle(placeholderSrc)} />
+
+          <ScaleBar viewerRef={osdRef} microPerPx={slide.micro_per_px} osdReady={osdReady} />
 
           {/* Zoom slider + magnification presets (bottom-left) */}
           <ZoomControls
