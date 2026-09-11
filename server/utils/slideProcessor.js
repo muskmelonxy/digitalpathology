@@ -226,6 +226,24 @@ async function processKfbSlide(slideId, filePath, uploadsDir, tilesDir) {
     });
     await ensureOverviewSafe(slideId, false);
     console.log(`KFB slide ${slideId} preview-ready: ${meta.width}x${meta.height} maxLevel=${meta.maxLevel} (on-demand tiles)`);
+    // Prebuild low/mid zoom from overview so first pan is instant.
+    setImmediate(() => {
+      const { prebuildKfbCoarseLevels } = require('./tileServe');
+      prebuildKfbCoarseLevels(slideId, meta.width, meta.height, meta.maxLevel, 256)
+        .then((r) => console.log(`[kfb] coarse prebuild slide ${slideId}: ${r.tiles} tiles in ${r.ms}ms`))
+        .catch((e) => console.error(`[kfb] coarse prebuild failed slide ${slideId}:`, e.message));
+    });
+    // Warm native decoder for high-zoom tiles.
+    setImmediate(() => {
+      try {
+        const { getSession } = require('./kfbWorker');
+        getSession(filePath).opened
+          .then(() => console.log(`[kfb] worker warmed for slide ${slideId}`))
+          .catch((e) => console.error(`[kfb] worker warm failed slide ${slideId}:`, e.message));
+      } catch (e) {
+        console.error(`[kfb] worker warm error slide ${slideId}:`, e.message);
+      }
+    });
     return;
   }
 

@@ -37,7 +37,17 @@ router.get('/public/:token', async (req, res) => {
       return res.status(404).json({ error: 'Share link invalid or expired' });
     }
 
-    res.json({
+        // Warm KFB decoder for public viewers.
+    try {
+      const pathMod = require('path');
+      const { getSession } = require('../utils/kfbWorker');
+      if (String(slide.original_format || '').toLowerCase().includes('kfb') || String(slide.filename || '').toLowerCase().endsWith('.kfb')) {
+        const src = pathMod.join(__dirname, '../../uploads/slides', slide.filename);
+        getSession(src).opened.catch(() => {});
+      }
+    } catch (e) {}
+
+res.json({
       id: slide.id,
       name: slide.name,
       description: slide.description,

@@ -61,6 +61,84 @@ function sourcePathFor(slide) {
 }
 
 
+
+/**
+ * Pre-generate all non-native zoom levels for a KFB slide by cropping the
+ * WSI overview/thumbnail. This removes first-pan latency at low/mid zoom.
+ * Native maxLevel tiles stay on-demand (vendor decode).
+ */
+async function prebuildKfbCoarseLevels(slideId, width, height, maxLevel, tileSize = 256) {
+  const sharp = require('sharp');
+  const candidates = [
+    path.join(__dirname, '../../uploads/overviews', `${slideId}.jpg`),
+    path.join(__dirname, '../../uploads/thumbnails', `${slideId}.jpg`)
+  ];
+  let overview = null;
+  let best = -1;
+  for (const c of candidates) {
+    if (!(await fs.pathExists(c))) continue;
+    try {
+      const m = await sharp(c).metadata();
+      const px = (m.width || 0) * (m.height || 0);
+      if (px > best) { best = px; overview = c; }
+    } catch (e) {
+      if (!overview) overview = c;
+    }
+  }
+  if (!overview) throw new Error(`no overview for slide ${slideId}`);
+
+  const ov = sharp(overview);
+  const meta = await ov.metadata();
+  const ow = meta.width || 1;
+  const oh = meta.height || 1;
+  let n = 0;
+  const t0 = Date.now();
+
+  for (let level = 0; level < maxLevel; level++) {
+    const d = 2 ** (maxLevel - level);
+    const levelWidth = Math.max(1, Math.ceil(width / d));
+    const levelHeight = Math.max(1, Math.ceil(height / d));
+    const cols = Math.max(1, Math.ceil(levelWidth / tileSize));
+    const rows = Math.max(1, Math.ceil(levelHeight / tileSize));
+    const levelDir = path.join(TILES_ROOT, String(slideId), String(level));
+    await fs.ensureDir(levelDir);
+
+    const jobs = [];
+    const flush = async () => {
+      const batch = jobs.splice(0, jobs.length);
+      await Promise.all(batch);
+    };
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const dest = path.join(levelDir, `${col}_${row}.jpg`);
+        if (await fs.pathExists(dest)) { n += 1; continue; }
+        const left = Math.floor((col * tileSize * ow) / levelWidth);
+        const top = Math.floor((row * tileSize * oh) / levelHeight);
+        const right = Math.ceil((Math.min(levelWidth, (col + 1) * tileSize) * ow) / levelWidth);
+        const bottom = Math.ceil((Math.min(levelHeight, (row + 1) * tileSize) * oh) / levelHeight);
+        const extractLeft = Math.max(0, Math.min(left, ow - 1));
+        const extractTop = Math.max(0, Math.min(top, oh - 1));
+        const extractWidth = Math.max(1, Math.min(right - extractLeft, ow - extractLeft));
+        const extractHeight = Math.max(1, Math.min(bottom - extractTop, oh - extractTop));
+        jobs.push((async () => {
+          const tmp = `${dest}.tmp.jpg`;
+          await sharp(overview)
+            .extract({ left: extractLeft, top: extractTop, width: extractWidth, height: extractHeight })
+            .resize(tileSize, tileSize, { fit: 'fill' })
+            .jpeg({ quality: 80 })
+            .toFile(tmp);
+          await fs.move(tmp, dest, { overwrite: true });
+          n += 1;
+        })());
+        if (jobs.length >= 32) await flush();
+      }
+    }
+    await flush();
+  }
+  return { tiles: n, ms: Date.now() - t0, overview };
+}
+
 async function generateKfbOverviewTile({ slideId, level, col, row, tileSize, maxLevel, width, height, dest }) {
   const sharp = require('sharp');
   const candidates = [
@@ -231,4 +309,4 @@ async function tileMiddleware(req, res, next) {
   }
 }
 
-module.exports = { tileMiddleware, ensureTile, tilePath };
+module.exports = { tileMiddleware, ensureTile, tilePath, prebuildKfbCoarseLevels, generateKfbOverviewTile };

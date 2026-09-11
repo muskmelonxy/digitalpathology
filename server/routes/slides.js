@@ -94,6 +94,16 @@ router.get('/:id/info', authenticateToken, async (req, res) => {
       }
     }
 
+    // Warm KFB decoder so the first high-zoom tiles are faster.
+    if (String(slide.original_format || '').toLowerCase().includes('kfb') || String(slide.filename || '').toLowerCase().endsWith('.kfb')) {
+      try {
+        const pathMod = require('path');
+        const { getSession } = require('../utils/kfbWorker');
+        const src = pathMod.join(__dirname, '../../uploads/slides', slide.filename);
+        getSession(src).opened.catch(() => {});
+      } catch (e) {}
+    }
+
     res.json({
       width: slide.width,
       height: slide.height,
