@@ -28,15 +28,15 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-[#12211f] flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        <div className="bg-white rounded-2xl shadow-xl p-8">
+        <div className="bg-[#f7f3eb] rounded-3xl shadow-xl p-8">
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-100 mb-4">
-              <Microscope className="w-8 h-8 text-blue-600" />
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-[#e7f3f0] mb-4">
+              <Microscope className="w-8 h-8 text-stain-700" />
             </div>
-            <h1 className="text-2xl font-bold text-gray-900">Digital Slide System</h1>
-            <p className="text-gray-500 mt-2">Sign in to access your slides</p>
+            <h1 className="font-serif text-3xl text-ink">数字玻片</h1>
+            <p className="text-stone-500 mt-2">Digital Slides · 登录后查看切片</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-6">

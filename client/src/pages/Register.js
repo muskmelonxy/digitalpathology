@@ -42,11 +42,11 @@ export default function Register() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-[#12211f] flex items-center justify-center p-4">
       <div className="w-full max-w-md">
         <Link
           to="/login"
-          className="inline-flex items-center gap-2 text-gray-600 hover:text-gray-800 mb-4"
+          className="inline-flex items-center gap-2 text-[#e7efe9] hover:text-white mb-4"
         >
           <ArrowLeft className="w-4 h-4" />
           Back to Login

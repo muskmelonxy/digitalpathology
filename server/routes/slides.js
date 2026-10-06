@@ -98,7 +98,8 @@ router.get('/:id/info', authenticateToken, async (req, res) => {
       height: slide.height,
       tileSize: slide.tile_size,
       maxLevel: slide.max_level,
-      format: 'jpg'
+      format: 'jpg',
+      viewMode: slide.view_mode || 'pyramid'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

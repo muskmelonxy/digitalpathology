@@ -75,20 +75,28 @@ function initDatabase() {
           FOREIGN KEY (course_id) REFERENCES courses(id),
           FOREIGN KEY (uploaded_by) REFERENCES users(id)
         )
-      `, async (err) => {
-        if (err) {
-          reject(err);
-          return;
-        }
+      `);
 
-        // Create default teacher account
-        try {
-          await createDefaultUser();
-          resolve();
-        } catch (e) {
-          resolve(); // Continue even if default user exists
+      const finish = () => {
+        createDefaultUser().then(resolve).catch(() => resolve());
+      };
+      const ignoreDuplicate = (err) => {
+        if (err && !/duplicate column name/i.test(err.message)) {
+          console.error('Schema update:', err.message);
         }
-      });
+      };
+
+      db.run(
+        `ALTER TABLE slides ADD COLUMN view_mode TEXT DEFAULT 'pyramid'`,
+        ignoreDuplicate
+      );
+      db.run(
+        `ALTER TABLE slides ADD COLUMN error_message TEXT`,
+        (err) => {
+          ignoreDuplicate(err);
+          finish();
+        }
+      );
     });
   });
 }

@@ -6,6 +6,8 @@ import Login from './pages/Login';
 import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import SlideViewer from './pages/SlideViewer';
+import Library from './pages/Library';
+import LibraryViewer from './pages/LibraryViewer';
 import Slides from './pages/Slides';
 import Courses from './pages/Courses';
 import CourseDetail from './pages/CourseDetail';
@@ -48,6 +50,8 @@ function AppRoutes() {
         }
       >
         <Route index element={<Dashboard />} />
+        <Route path="library" element={<Library />} />
+        <Route path="library/:filename" element={<LibraryViewer />} />
         <Route path="slides" element={<Slides />} />
         <Route path="slides/:id" element={<SlideViewer />} />
         <Route path="courses" element={<Courses />} />

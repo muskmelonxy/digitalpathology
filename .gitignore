@@ -45,3 +45,17 @@ Thumbs.db
 
 # Test files
 uploads/test_*
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+tile_server/tests/fixtures/*.svs
+tile_server/tests/fixtures/*.tif
+tile_server/tests/fixtures/*.tiff
+
+# Whole-slide images dropped in for direct viewing
+slides/*
+!slides/.gitkeep
+!slides/README.md

@@ -5,18 +5,32 @@ module.exports = {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['Figtree', 'system-ui', 'sans-serif'],
+        serif: ['"Source Serif 4"', 'Georgia', 'serif'],
+      },
       colors: {
+        ink: '#1c1915',
+        paper: '#f3efe6',
+        stain: {
+          50: '#f2f8f6',
+          100: '#e0f0ec',
+          600: '#1f6f68',
+          700: '#185850',
+          800: '#123f3b',
+        },
+        clay: '#e7a15a',
         primary: {
-          50: '#eff6ff',
-          100: '#dbeafe',
-          200: '#bfdbfe',
+          50: '#f2f8f6',
+          100: '#e0f0ec',
+          200: '#c5e2db',
           300: '#93c5fd',
           400: '#60a5fa',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
-          800: '#1e40af',
-          900: '#1e3a8a',
+          500: '#1f6f68',
+          600: '#185850',
+          700: '#123f3b',
+          800: '#123f3b',
+          900: '#0d2c29',
         }
       }
     },
