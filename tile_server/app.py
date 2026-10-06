@@ -65,8 +65,8 @@ def create_app(slide_dirs: dict[str, Path] | None = None) -> Flask:
         return response
 
     @app.errorhandler(SlideNotFound)
-    def missing(_exc):
-        return jsonify(error="Slide not found"), 404
+    def missing(exc):
+        return jsonify(error=str(exc) or "Slide not found"), 404
 
     @app.errorhandler(SlideOpenError)
     def cannot_open(exc):

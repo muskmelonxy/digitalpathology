@@ -88,6 +88,18 @@ class KfbAdapter:
         except Exception as exc:  # noqa: BLE001
             raise openslide.OpenSlideError(str(exc)) from exc
 
+    def get_thumbnail(self, size):
+        # kfbslide 0.3.4 ignores `size` when the file has no stored thumbnail
+        # and returns the whole smallest pyramid level.
+        try:
+            image = self._s.get_thumbnail(size)
+        except Exception as exc:  # noqa: BLE001
+            raise openslide.OpenSlideError(str(exc)) from exc
+        if image.width > size[0] or image.height > size[1]:
+            image = image.copy()
+            image.thumbnail(size, Image.LANCZOS)
+        return image
+
 
 def open_any(path):
     """Return an OpenSlide-like object for a .kfb or any OpenSlide format."""

@@ -162,6 +162,13 @@ def test_kfb_metadata_hides_label_and_serves_tiles(kfb_dir):
     assert tile.content_type == "image/jpeg"
     assert tile.data[:2] == b"\xff\xd8"
 
+    past_edge = client.get("/r/library/study.kfb_files/0/50_50.jpeg")
+    assert past_edge.status_code == 404
+    assert past_edge.get_json()["error"] == "Tile not found"
+    missing_slide = client.get("/r/library/missing.kfb.dzi")
+    assert missing_slide.status_code == 404
+    assert missing_slide.get_json()["error"] == "Slide not found"
+
     thumb = client.get("/r/library/study.kfb/thumbnail.jpg")
     assert thumb.status_code == 200
     assert thumb.data[:2] == b"\xff\xd8"
@@ -180,6 +187,34 @@ def test_kfb_metadata_hides_label_and_serves_tiles(kfb_dir):
         "/r/library/study.kfb/associated/label",
     ):
         assert client.get(path).status_code == 404
+
+
+def test_kfb_thumbnail_shrinks_when_reader_ignores_size(monkeypatch, tmp_path):
+    import tile_server.slides as slides
+
+    class Oversized:
+        """Stand-in for kfbslide 0.3.4, which returns the smallest pyramid level."""
+
+        def __init__(self, path):
+            self.path = path
+
+        def get_thumbnail(self, size):
+            return Image.new("RGB", (1014, 770), (180, 100, 120))
+
+    monkeypatch.setattr(slides, "kfbslide", type("K", (), {"OpenSlide": Oversized}))
+    image = KfbAdapter(tmp_path / "level.kfb").get_thumbnail((512, 512))
+    assert image.width <= 512
+    assert image.height <= 512
+    assert image.width == 512
+    assert image.height < 512
+
+    class AlreadySmall(Oversized):
+        def get_thumbnail(self, size):
+            return Image.new("RGB", (64, 48), (10, 20, 30))
+
+    monkeypatch.setattr(slides, "kfbslide", type("K", (), {"OpenSlide": AlreadySmall}))
+    small = KfbAdapter(tmp_path / "small.kfb").get_thumbnail((512, 512))
+    assert small.size == (64, 48)
 
 
 def test_adapter_read_region_wraps_errors(monkeypatch):
@@ -260,6 +295,7 @@ def test_public_svs_dzi_and_tiles(svs_dir):
 
     missing = client.get(f"/r/library/{SVS_NAME}_files/{top}/999_999.jpeg")
     assert missing.status_code == 404
+    assert missing.get_json()["error"] == "Tile not found"
 
     thumb = client.get(f"/r/library/{SVS_NAME}/thumbnail.jpg")
     assert thumb.status_code == 200
