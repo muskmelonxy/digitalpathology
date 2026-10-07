@@ -245,7 +245,7 @@ class SlideStore:
         self._handles: dict[tuple[str, str], _Handle] = {}
         self._thumbnails: dict[tuple[str, float], bytes] = {}
 
-    def resolve(self, root: str, filename: str) -> Path:
+    def _locate(self, root: str, filename: str) -> Path:
         directory = self.roots.get(root)
         if directory is None:
             raise SlideNotFound(f"Unknown slide collection '{root}'")
@@ -264,6 +264,10 @@ class SlideStore:
             inside = str(candidate).startswith(str(root_resolved) + "/")
         if not inside or candidate == root_resolved or not candidate.is_file():
             raise SlideNotFound("Slide not found")
+        return candidate
+
+    def resolve(self, root: str, filename: str) -> Path:
+        candidate = self._locate(root, filename)
         if candidate.suffix.lower() not in SUPPORTED_EXTENSIONS:
             raise SlideNotFound("Unsupported slide format")
         return candidate
@@ -400,7 +404,9 @@ class SlideStore:
         return data
 
     def clinical_path(self, root: str, filename: str) -> Path:
-        path = self.resolve(root, filename)
+        # Course uploads can be JPEG or PNG. The sidecar sits beside the file
+        # even when that file is not a DeepZoom source.
+        path = self._locate(root, filename)
         return path.with_name(path.name + ".clinical.json")
 
     def read_clinical(self, root: str, filename: str) -> dict:

@@ -35,7 +35,7 @@ export default function Library() {
             <Microscope className="w-4 h-4" />
             直接浏览 · Direct view
           </p>
-          <h1>数字切片库</h1>
+          <h1>示例切片</h1>
           <p className="lede">
             把 <code>.kfb</code>、<code>.svs</code>、<code>.tif</code> 放进
             <code>slides/</code> 即可全分辨率查看。江丰切片由 kfbslide 直接读取，不必先转成 SVS 或 TIFF。
@@ -61,7 +61,7 @@ export default function Library() {
       {isLoading && (
         <div className="library-state">
           <div className="stage-spinner" />
-          <p>正在读取数字切片库…</p>
+          <p>正在读取示例切片…</p>
         </div>
       )}
 
@@ -85,7 +85,7 @@ export default function Library() {
       {!isLoading && !error && slides.length === 0 && (
         <div className="library-state">
           <FolderOpen className="w-12 h-12" />
-          <h2>{search ? '没有匹配的切片' : '数字切片库是空的'}</h2>
+          <h2>{search ? '没有匹配的切片' : '示例切片是空的'}</h2>
           <p>
             {search
               ? '换一个关键词试试。'

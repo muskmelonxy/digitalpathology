@@ -286,19 +286,16 @@ export default function WsiViewer({
     <p className="meta-note">{metaError || '正在读取切片信息…'}</p>
   );
 
-  const details = (
-    <>
-      {info}
-      {filename && !metaError ? <ClinicalPanel root={root} filename={filename} /> : null}
-    </>
-  );
+  const clinical = filename && !metaError
+    ? <ClinicalPanel root={root} filename={filename} />
+    : null;
 
   return (
     <ViewerChrome
       title={displayTitle}
       subtitle={displaySubtitle}
       backTo={backTo}
-      backLabel={backTo === '/library' ? '数字切片库' : '返回'}
+      backLabel={backTo === '/library' ? '示例切片' : '返回'}
       viewerRef={osdRef}
       exportName={displayTitle}
       magnifications={objective ? MAG_STOPS : null}
@@ -312,7 +309,8 @@ export default function WsiViewer({
       showInfo={showInfo}
       onToggleInfo={() => setShowInfo((value) => !value)}
       filmstrip={filmstrip}
-      info={details}
+      clinical={clinical}
+      info={info}
       scaleBar={opened ? scaleBar : null}
       loading={!opened && !openError && !metaError}
       error={openError || metaError}

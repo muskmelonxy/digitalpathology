@@ -51,7 +51,7 @@ export default function Layout() {
 
   const navItems = [
     { path: '/', label: '总览', hint: 'Dashboard', icon: LayoutDashboard },
-    { path: '/library', label: '数字切片库', hint: 'Library', icon: Microscope },
+    { path: '/library', label: '示例切片', hint: 'Examples', icon: Microscope },
     { path: '/slides', label: '课程切片', hint: 'Course slides', icon: Image },
     { path: '/courses', label: '课程', hint: 'Courses', icon: BookOpen },
   ];

@@ -67,7 +67,7 @@ export default function Slides() {
           <h1 className="text-2xl font-bold text-gray-900">课程切片</h1>
           <p className="text-sm text-stone-500 mt-1">
             课程里的切片。KFB / SVS 全分辨率浏览请打开
-            <Link to="/library" className="text-stain-700 font-medium"> 数字切片库</Link>。
+            <Link to="/library" className="text-stain-700 font-medium"> 示例切片</Link>。
           </p>
         </div>
         {user?.role !== 'student' && (

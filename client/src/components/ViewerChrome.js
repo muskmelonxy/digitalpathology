@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   ArrowLeft,
   Camera,
+  ChevronDown,
   Home,
   Info,
   Maximize,
@@ -28,6 +29,7 @@ export default function ViewerChrome({
   showInfo,
   onToggleInfo,
   filmstrip = [],
+  clinical = null,
   info,
   scaleBar,
   viewerRef,
@@ -44,6 +46,7 @@ export default function ViewerChrome({
   const [snapshotOpen, setSnapshotOpen] = useState(false);
   const [withScale, setWithScale] = useState(true);
   const [snapshotError, setSnapshotError] = useState('');
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   useEffect(() => {
     const onChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
@@ -248,11 +251,20 @@ export default function ViewerChrome({
 
         {showInfo && (
           <aside className="meta-panel">
-            <div className="meta-panel-head">
-              <h2>切片信息</h2>
-              <p>Slide details</p>
-            </div>
-            {info}
+            {clinical}
+            <button
+              type="button"
+              className="details-toggle"
+              aria-expanded={detailsOpen}
+              onClick={() => setDetailsOpen((open) => !open)}
+            >
+              <span>
+                <strong>切片信息</strong>
+                <em>Slide details</em>
+              </span>
+              <ChevronDown className={detailsOpen ? 'is-open' : ''} />
+            </button>
+            {detailsOpen ? info : null}
           </aside>
         )}
       </div>

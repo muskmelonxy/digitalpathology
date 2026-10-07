@@ -5,6 +5,7 @@ import axios from 'axios';
 import OpenSeadragon from 'openseadragon';
 import { useAuth } from '../contexts/AuthContext';
 import ViewerChrome from '../components/ViewerChrome';
+import ClinicalPanel from '../components/ClinicalPanel';
 import WsiViewer from './WsiViewer';
 
 function CenteredMessage({ title, body, to = '/slides', action = '返回课程切片' }) {
@@ -109,6 +110,9 @@ function PyramidViewer({ slide, slideInfo, token }) {
       onToggleInfo={() => setShowInfo((value) => !value)}
       filmstrip={filmstrip}
       loading={!opened}
+      clinical={slide.filename ? (
+        <ClinicalPanel root="uploads" filename={slide.filename} />
+      ) : null}
       info={(
         <div className="meta-body">
           <dl>

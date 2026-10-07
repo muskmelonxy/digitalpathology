@@ -370,6 +370,22 @@ def test_clinical_sidecar_roundtrip_and_privacy(tmp_path):
     assert cleared["empty"] is True
 
 
+def test_clinical_sidecar_beside_course_image(tmp_path):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    (uploads / "lesson.jpg").write_bytes(b"not-a-jpeg")
+    store = SlideStore({"uploads": uploads})
+    saved = store.write_clinical(
+        "uploads",
+        "lesson.jpg",
+        {"case_title": "课程病例", "notes": "金字塔切片"},
+        updated_by="teacher",
+    )
+    assert saved["case_title"] == "课程病例"
+    assert store.read_clinical("uploads", "lesson.jpg")["notes"] == "金字塔切片"
+    assert store.list_slides("uploads") == []
+
+
 def test_clinical_http(tmp_path):
     library = tmp_path / "slides"
     library.mkdir()
