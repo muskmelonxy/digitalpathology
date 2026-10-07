@@ -86,7 +86,11 @@ export default function Dashboard() {
       {/* Quick Actions */}
       {user?.role !== 'student' && (
         <div className="flex flex-wrap gap-4">
-          <Link to="/upload" className="btn-primary inline-flex items-center gap-2">
+          <Link to="/library" className="btn-primary inline-flex items-center gap-2">
+            <Image className="w-4 h-4" />
+            示例切片
+          </Link>
+          <Link to="/upload" className="btn-secondary inline-flex items-center gap-2">
             <Image className="w-4 h-4" />
             Upload New Slide
           </Link>

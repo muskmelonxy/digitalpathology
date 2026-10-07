@@ -9,6 +9,7 @@ const slideRoutes = require('./routes/slides');
 const courseRoutes = require('./routes/courses');
 const uploadRoutes = require('./routes/upload');
 const tileRoutes = require('./routes/tiles');
+const wsiRoutes = require('./routes/wsi');
 const { initDatabase } = require('./database');
 
 const app = express();
@@ -18,6 +19,8 @@ const PORT = process.env.PORT || 3001;
 fs.ensureDirSync(path.join(__dirname, '../uploads/slides'));
 fs.ensureDirSync(path.join(__dirname, '../uploads/tiles'));
 fs.ensureDirSync(path.join(__dirname, '../uploads/thumbnails'));
+fs.ensureDirSync(path.join(__dirname, '../slides'));
+fs.ensureDirSync(path.join(__dirname, '../data'));
 
 // Middleware
 app.use(cors());
@@ -34,6 +37,7 @@ app.use('/api/slides', slideRoutes);
 app.use('/api/courses', courseRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/tiles', tileRoutes);
+app.use('/api/wsi', wsiRoutes);
 
 // Serve React app in production
 if (process.env.NODE_ENV === 'production') {
@@ -47,6 +51,7 @@ if (process.env.NODE_ENV === 'production') {
 initDatabase().then(() => {
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`WSI tiles proxied from ${process.env.WSI_TILE_URL || 'http://127.0.0.1:5001'}`);
   });
 }).catch(err => {
   console.error('Failed to initialize database:', err);

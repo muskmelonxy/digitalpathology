@@ -63,7 +63,13 @@ export default function Slides() {
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <h1 className="text-2xl font-bold text-gray-900">Slides</h1>
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">课程切片</h1>
+          <p className="text-sm text-stone-500 mt-1">
+            课程里的切片。KFB / SVS 全分辨率浏览请打开
+            <Link to="/library" className="text-stain-700 font-medium"> 示例切片</Link>。
+          </p>
+        </div>
         {user?.role !== 'student' && (
           <Link to="/upload" className="btn-primary inline-flex items-center gap-2">
             <Image className="w-4 h-4" />
@@ -145,6 +151,9 @@ export default function Slides() {
                   <p className="text-sm text-gray-500 mt-1">{slide.course_name || 'No Course'}</p>
                   <div className="flex items-center gap-2 mt-2">
                     {getStatusBadge(slide.status)}
+                    {slide.view_mode === 'direct' && (
+                      <span className="px-2 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-800">直读</span>
+                    )}
                     <span className="text-xs text-gray-400">
                       {new Date(slide.created_at).toLocaleDateString()}
                     </span>

@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { useQuery, useMutation, useQueryClient } from 'react-query';
+import { useQuery, useQueryClient } from 'react-query';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import {
@@ -13,8 +13,19 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
-const SUPPORTED_FORMATS = ['.tiff', '.tif', '.jpg', '.jpeg', '.png', '.kfb', '.kfbio'];
+const CONVERTIBLE = ['tiff', 'tif', 'jpg', 'jpeg', 'png', 'kfb', 'kfbio'];
+const DIRECT_ONLY = ['svs', 'ndpi', 'scn', 'bif', 'vms', 'vmu', 'mrxs'];
 const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
+
+function extensionOf(name) {
+  return (name.split('.').pop() || '').toLowerCase();
+}
+
+function defaultViewMode(name) {
+  const ext = extensionOf(name);
+  if (ext === 'kfb' || ext === 'kfbio' || DIRECT_ONLY.includes(ext)) return 'direct';
+  return 'pyramid';
+}
 
 export default function Upload() {
   const navigate = useNavigate();
@@ -32,6 +43,7 @@ export default function Upload() {
       name: file.name.replace(/\.[^/.]+$/, ''),
       description: '',
       course_id: '',
+      viewMode: defaultViewMode(file.name),
       progress: 0,
       status: 'pending', // pending, uploading, processing, done, error
       error: null,
@@ -43,8 +55,8 @@ export default function Upload() {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'image/*': ['.tiff', '.tif', '.jpg', '.jpeg', '.png'],
-      'application/octet-stream': ['.kfb', '.kfbio']
+      'image/*': ['.tiff', '.tif', '.jpg', '.jpeg', '.png', '.svs'],
+      'application/octet-stream': ['.kfb', '.kfbio', '.svs', '.ndpi', '.scn', '.tif', '.tiff', '.bif', '.vms']
     },
     maxSize: MAX_FILE_SIZE,
     onDropRejected: (rejected) => {
@@ -67,6 +79,7 @@ export default function Upload() {
     formData.append('slide', fileObj.file);
     formData.append('name', fileObj.name);
     formData.append('description', fileObj.description);
+    formData.append('view_mode', fileObj.viewMode || 'pyramid');
     if (fileObj.course_id) {
       formData.append('course_id', fileObj.course_id);
     }
@@ -111,7 +124,10 @@ export default function Upload() {
           updateFile(index, { status: 'done' });
           queryClient.invalidateQueries('slides');
         } else if (status === 'error') {
-          updateFile(index, { status: 'error', error: 'Processing failed' });
+          updateFile(index, {
+            status: 'error',
+            error: response.data.error_message || 'Processing failed'
+          });
         } else {
           // Still processing, poll again
           setTimeout(checkStatus, 2000);
@@ -185,7 +201,7 @@ export default function Upload() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Upload Slides</h1>
           <p className="text-gray-600 mt-1">
-            Upload TIFF, JPEG, PNG, or KFBIO files
+            KFB 与 SVS 默认直读。JPEG / PNG / TIFF 仍可生成金字塔，原有 KFB 抽图转换也还在。
           </p>
         </div>
         {doneCount > 0 && (
@@ -214,7 +230,7 @@ export default function Upload() {
         </p>
         <p className="text-gray-500 mt-2">or click to browse</p>
         <p className="text-sm text-gray-400 mt-4">
-          Supported: TIFF, JPEG, PNG, KFBIO (max 5GB)
+          TIFF、JPEG、PNG、KFB、SVS（最大 5GB）
         </p>
       </div>
 
@@ -268,6 +284,27 @@ export default function Upload() {
                     <p className="text-sm text-gray-500">
                       {(fileObj.file.size / (1024 * 1024)).toFixed(2)} MB
                     </p>
+
+                    {fileObj.status === 'pending' && (CONVERTIBLE.includes(extensionOf(fileObj.file.name)) || DIRECT_ONLY.includes(extensionOf(fileObj.file.name))) && (
+                      <div className="flex flex-wrap gap-2 mt-3">
+                        <button
+                          type="button"
+                          onClick={() => updateFile(index, { viewMode: 'direct' })}
+                          className={`px-3 py-1.5 rounded-full text-sm border ${fileObj.viewMode === 'direct' ? 'bg-stain-700 text-white border-stain-700' : 'bg-white text-stone-700 border-stone-200'}`}
+                        >
+                          直读 Direct
+                        </button>
+                        {CONVERTIBLE.includes(extensionOf(fileObj.file.name)) && (
+                          <button
+                            type="button"
+                            onClick={() => updateFile(index, { viewMode: 'pyramid' })}
+                            className={`px-3 py-1.5 rounded-full text-sm border ${fileObj.viewMode !== 'direct' ? 'bg-stain-700 text-white border-stain-700' : 'bg-white text-stone-700 border-stone-200'}`}
+                          >
+                            转金字塔 Convert
+                          </button>
+                        )}
+                      </div>
+                    )}
 
                     {fileObj.status === 'pending' && (
                       <div className="flex gap-3 mt-3">

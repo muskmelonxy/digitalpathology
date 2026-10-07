@@ -35,8 +35,68 @@ async function readKFBIOHeader(filePath) {
   }
 }
 
-// Supported formats
-const SUPPORTED_FORMATS = ['.tiff', '.tif', '.jpg', '.jpeg', '.png', '.kfb', '.kfbio'];
+// Pyramid conversion still handles everyday images and the existing KFB JPEG extract.
+const CONVERTIBLE_FORMATS = new Set(['tiff', 'tif', 'jpg', 'jpeg', 'png', 'kfb', 'kfbio']);
+// Direct DeepZoom viewing: KFB via kfbslide, the rest via OpenSlide.
+const DIRECT_ONLY_FORMATS = new Set(['svs', 'ndpi', 'scn', 'bif', 'vms', 'vmu', 'mrxs']);
+const SUPPORTED_FORMATS = [
+  '.tiff', '.tif', '.jpg', '.jpeg', '.png', '.kfb', '.kfbio',
+  '.svs', '.ndpi', '.scn', '.bif', '.vms', '.vmu', '.mrxs',
+];
+
+function resolveViewMode(format, requested) {
+  const convertible = CONVERTIBLE_FORMATS.has(format);
+  const directable = convertible || DIRECT_ONLY_FORMATS.has(format);
+  if (requested === 'direct' && directable) return 'direct';
+  if (requested === 'pyramid' && convertible) return 'pyramid';
+  if (format === 'kfb' || format === 'kfbio' || DIRECT_ONLY_FORMATS.has(format)) {
+    return 'direct';
+  }
+  return 'pyramid';
+}
+
+function tileBase() {
+  return process.env.WSI_TILE_URL || 'http://127.0.0.1:5001';
+}
+
+async function prepareDirectSlide(slideId, filename) {
+  try {
+    const encoded = encodeURIComponent(filename);
+    const metaResponse = await fetch(`${tileBase()}/r/uploads/${encoded}/meta`);
+    const metaBody = await metaResponse.json().catch(() => ({}));
+    if (!metaResponse.ok) {
+      throw new Error(metaBody.error || `Tile service returned ${metaResponse.status}`);
+    }
+
+    const thumbResponse = await fetch(`${tileBase()}/r/uploads/${encoded}/thumbnail.jpg`);
+    if (!thumbResponse.ok) {
+      throw new Error('Could not build a thumbnail');
+    }
+    const thumbnailPath = path.join(__dirname, '../../uploads/thumbnails', `${slideId}.jpg`);
+    await fs.writeFile(thumbnailPath, Buffer.from(await thumbResponse.arrayBuffer()));
+
+    await run(
+      `UPDATE slides
+       SET status = 'ready', view_mode = 'direct', width = ?, height = ?, max_level = ?,
+           tile_size = ?, thumbnail_path = ?, error_message = NULL
+       WHERE id = ?`,
+      [
+        metaBody.width,
+        metaBody.height,
+        Math.max(0, (metaBody.dzi_levels || 1) - 1),
+        metaBody.tile_size || 254,
+        `/uploads/thumbnails/${slideId}.jpg`,
+        slideId,
+      ]
+    );
+  } catch (error) {
+    console.error(`Direct view failed for slide ${slideId}:`, error.message);
+    await run(
+      `UPDATE slides SET status = 'error', view_mode = 'direct', error_message = ? WHERE id = ?`,
+      [error.message || 'Direct view failed', slideId]
+    );
+  }
+}
 
 // Configure multer storage
 const storage = multer.diskStorage({
@@ -74,14 +134,15 @@ router.post('/', authenticateToken, requireRole('teacher', 'admin'), upload.sing
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const { name, description, course_id, tile_size = 256 } = req.body;
+    const { name, description, course_id, tile_size = 256, view_mode } = req.body;
     const fileExt = path.extname(req.file.originalname).toLowerCase();
     const originalFormat = fileExt.replace('.', '');
+    const viewMode = resolveViewMode(originalFormat, view_mode);
 
     // Create database entry
     const result = await run(
-      `INSERT INTO slides (name, description, filename, original_format, course_id, uploaded_by, tile_size, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO slides (name, description, filename, original_format, course_id, uploaded_by, tile_size, status, view_mode)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name || req.file.originalname,
         description || '',
@@ -90,14 +151,19 @@ router.post('/', authenticateToken, requireRole('teacher', 'admin'), upload.sing
         course_id || null,
         req.user.id,
         parseInt(tile_size) || 256,
-        'processing'
+        'processing',
+        viewMode
       ]
     );
 
     const slideId = result.id;
 
-    // Start processing in background
-    processSlide(slideId, req.file.path, originalFormat, tile_size);
+    // Direct view reads the original file on demand. Pyramid conversion is unchanged.
+    if (viewMode === 'direct') {
+      prepareDirectSlide(slideId, req.file.filename);
+    } else {
+      processSlide(slideId, req.file.path, originalFormat, tile_size);
+    }
 
     res.status(201).json({
       id: slideId,
@@ -116,7 +182,10 @@ router.post('/', authenticateToken, requireRole('teacher', 'admin'), upload.sing
 // Get upload status
 router.get('/status/:id', authenticateToken, async (req, res) => {
   try {
-    const slide = await get('SELECT id, status, name FROM slides WHERE id = ?', [req.params.id]);
+    const slide = await get(
+      'SELECT id, status, name, error_message, view_mode FROM slides WHERE id = ?',
+      [req.params.id]
+    );
     if (!slide) {
       return res.status(404).json({ error: 'Slide not found' });
     }

@@ -1,304 +1,215 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { useQuery } from 'react-query';
 import axios from 'axios';
 import OpenSeadragon from 'openseadragon';
 import { useAuth } from '../contexts/AuthContext';
-import {
-  ArrowLeft,
-  ZoomIn,
-  ZoomOut,
-  RotateCcw,
-  Info,
-  Maximize,
-  Minimize
-} from 'lucide-react';
-import toast from 'react-hot-toast';
+import ViewerChrome from '../components/ViewerChrome';
+import ClinicalPanel from '../components/ClinicalPanel';
+import WsiViewer from './WsiViewer';
 
-export default function SlideViewer() {
-  const { id } = useParams();
+function CenteredMessage({ title, body, to = '/slides', action = '返回课程切片' }) {
+  return (
+    <div className="h-full bg-paper flex items-center justify-center p-8">
+      <div className="max-w-md text-center">
+        <h2 className="font-serif text-3xl text-ink">{title}</h2>
+        {body ? <p className="mt-3 text-stone-600">{body}</p> : null}
+        <Link to={to} className="btn-primary inline-block mt-6">{action}</Link>
+      </div>
+    </div>
+  );
+}
+
+function PyramidViewer({ slide, slideInfo, token }) {
   const viewerRef = useRef(null);
   const osdRef = useRef(null);
-  const [showInfo, setShowInfo] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [currentZoom, setCurrentZoom] = useState(1);
-  const { token } = useAuth();
-
-  const { data: slide, isLoading: slideLoading } = useQuery(
-    ['slide', id],
-    () => axios.get(`/api/slides/${id}`).then(res => res.data),
-    { enabled: !!id }
-  );
-
-  const { data: slideInfo, isLoading: infoLoading } = useQuery(
-    ['slideInfo', id],
-    () => axios.get(`/api/slides/${id}/info`).then(res => res.data),
-    { enabled: !!id }
+  const [showInfo, setShowInfo] = useState(true);
+  const [opened, setOpened] = useState(false);
+  const [imageZoom, setImageZoom] = useState(null);
+  const { data: siblings } = useQuery('slides', () =>
+    axios.get('/api/slides').then((res) => res.data)
   );
 
   useEffect(() => {
-    if (!slideInfo || !viewerRef.current) return;
-
-    console.log('SlideViewer: Initializing with slideInfo:', slideInfo);
-
-    // Clean up previous viewer
-    if (osdRef.current) {
-      osdRef.current.destroy();
-    }
-
-    // Create custom tile source for our pyramid structure
-    // Our pyramid structure matches OpenSeadragon's expectation:
-    //   Level 0 = lowest resolution (overview, fewest tiles)
-    //   Level maxLevel = highest resolution (original image, most tiles)
+    if (!slideInfo || !viewerRef.current) return undefined;
+    let viewer;
+    setOpened(false);
     const tileSource = {
       width: slideInfo.width,
       height: slideInfo.height,
       tileSize: slideInfo.tileSize,
       maxLevel: slideInfo.maxLevel,
       minLevel: 0,
-      getTileUrl: function(level, x, y) {
-        // OSD level 0 = lowest resolution
-        // Our level 0 = lowest resolution (matches!)
-        // Include token for authentication
-        return `/api/tiles/${id}/${level}/${x}/${y}.jpg?token=${token}`;
-      }
-    };
-
-    osdRef.current = OpenSeadragon({
-      element: viewerRef.current,
-      prefixUrl: 'https://cdn.jsdelivr.net/npm/openseadragon@4.1.0/build/openseadragon/images/',
-      showNavigationControl: false,
-      maxZoomPixelRatio: 2,
-      minZoomLevel: 0.1,
-      visibilityRatio: 0.5,
-      constrainDuringPan: true,
-      animationTime: 0.5,
-      springStiffness: 6,
-      gestureSettingsMouse: {
-        clickToZoom: true,
-        dblClickToZoom: true,
-        pinchToZoom: true,
-        scrollToZoom: true
+      getTileUrl(level, x, y) {
+        return `/api/tiles/${slide.id}/${level}/${x}/${y}.jpg?token=${token}`;
       },
-      gestureSettingsTouch: {
-        pinchToZoom: true,
-        scrollToZoom: true
-      }
-    });
-
-    // Open the tile source explicitly
-    osdRef.current.open(tileSource);
-
-    // Handle tile load errors
-    osdRef.current.addHandler('tile-load-failed', (event) => {
-      console.error('Tile load failed:', event);
-    });
-
-    // Handle open errors
-    osdRef.current.addHandler('open-failed', (event) => {
-      console.error('Open failed:', event);
-    });
-
-    // Track zoom changes
-    osdRef.current.addHandler('zoom', () => {
-      setCurrentZoom(osdRef.current.viewport.getZoom());
-    });
-
-    // Log when viewer is ready
-    osdRef.current.addHandler('open', () => {
-      console.log('SlideViewer: OpenSeadragon viewer ready');
-    });
-
-    return () => {
-      if (osdRef.current) {
-        osdRef.current.destroy();
-        osdRef.current = null;
-      }
     };
-  }, [slideInfo, id, token]);
+    viewer = OpenSeadragon({
+      element: viewerRef.current,
+      prefixUrl: `${process.env.PUBLIC_URL}/osd/`,
+      tileSources: tileSource,
+      showNavigationControl: false,
+      showNavigator: true,
+      navigatorPosition: 'BOTTOM_RIGHT',
+      navigatorHeight: 132,
+      navigatorWidth: 176,
+      navigatorAutoFade: false,
+      navigatorBackground: 'rgba(16, 22, 20, 0.92)',
+      navigatorBorderColor: 'rgba(231, 161, 90, 0.85)',
+      navigatorDisplayRegionColor: '#e7a15a',
+      maxZoomPixelRatio: 2,
+      visibilityRatio: 0.6,
+      constrainDuringPan: true,
+      animationTime: 0.4,
+    });
+    osdRef.current = viewer;
+    const observer = new ResizeObserver(() => viewer.forceResize());
+    observer.observe(viewerRef.current);
+    const publish = () => {
+      if (!viewer.world.getItemCount()) return;
+      setImageZoom(viewer.viewport.viewportToImageZoom(viewer.viewport.getZoom(true)));
+    };
+    viewer.addHandler('open', () => {
+      setOpened(true);
+      viewer.forceResize();
+      publish();
+    });
+    viewer.addHandler('zoom', publish);
+    return () => {
+      observer.disconnect();
+      try {
+        viewer.destroy();
+      } catch (err) {
+        // ignore teardown races
+      }
+      osdRef.current = null;
+    };
+  }, [slideInfo, slide.id, token]);
 
-  const handleZoomIn = () => {
-    osdRef.current?.viewport.zoomBy(1.5);
-  };
+  const filmstrip = (siblings || []).filter((item) => item.status === 'ready').map((item) => ({
+    key: item.id,
+    name: item.name,
+    src: item.thumbnail_path,
+    active: String(item.id) === String(slide.id),
+    href: `/slides/${item.id}`,
+  }));
 
-  const handleZoomOut = () => {
-    osdRef.current?.viewport.zoomBy(0.667);
-  };
+  return (
+    <ViewerChrome
+      title={slide.name}
+      subtitle={slide.course_name || '课程切片'}
+      viewerRef={osdRef}
+      exportName={slide.name}
+      backTo="/slides"
+      readout={imageZoom ? `${imageZoom.toFixed(2)}×` : '—'}
+      readoutHint="像素倍率"
+      onZoomIn={() => osdRef.current?.viewport.zoomBy(1.4)}
+      onZoomOut={() => osdRef.current?.viewport.zoomBy(1 / 1.4)}
+      onHome={() => osdRef.current?.viewport.goHome(false)}
+      showInfo={showInfo}
+      onToggleInfo={() => setShowInfo((value) => !value)}
+      filmstrip={filmstrip}
+      loading={!opened}
+      clinical={slide.filename ? (
+        <ClinicalPanel root="uploads" filename={slide.filename} />
+      ) : null}
+      info={(
+        <div className="meta-body">
+          <dl>
+            <div>
+              <dt>尺寸 Dimensions</dt>
+              <dd>{slide.width?.toLocaleString()} × {slide.height?.toLocaleString()} px</dd>
+            </div>
+            <div>
+              <dt>格式 Format</dt>
+              <dd className="uppercase">{slide.original_format}</dd>
+            </div>
+            <div>
+              <dt>瓦片 Tile</dt>
+              <dd>{slide.tile_size} px</dd>
+            </div>
+            <div>
+              <dt>层数 Levels</dt>
+              <dd>{(slide.max_level ?? 0) + 1}</dd>
+            </div>
+            <div>
+              <dt>课程 Course</dt>
+              <dd>{slide.course_name || '未分配'}</dd>
+            </div>
+            {slide.description ? (
+              <div>
+                <dt>说明 Notes</dt>
+                <dd>{slide.description}</dd>
+              </div>
+            ) : null}
+          </dl>
+          <p className="meta-note">
+            这张切片使用预先生成的金字塔。KFB / SVS 建议改用直读，以保留原始分辨率。
+          </p>
+        </div>
+      )}
+    >
+      <div ref={viewerRef} className="osd-root" />
+    </ViewerChrome>
+  );
+}
 
-  const handleReset = () => {
-    osdRef.current?.viewport.goHome();
-  };
+export default function SlideViewer() {
+  const { id } = useParams();
+  const { token } = useAuth();
 
-  const handleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      viewerRef.current?.requestFullscreen();
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen();
-      setIsFullscreen(false);
-    }
-  };
+  const { data: slide, isLoading: slideLoading } = useQuery(
+    ['slide', id],
+    () => axios.get(`/api/slides/${id}`).then((res) => res.data),
+    { enabled: !!id }
+  );
 
-  if (slideLoading || infoLoading) {
+  const direct = slide?.view_mode === 'direct';
+
+  const { data: slideInfo, isLoading: infoLoading } = useQuery(
+    ['slideInfo', id],
+    () => axios.get(`/api/slides/${id}/info`).then((res) => res.data),
+    { enabled: !!id && !!slide && !direct && slide.status === 'ready' }
+  );
+
+  if (slideLoading || (!direct && slide?.status === 'ready' && infoLoading)) {
     return (
-      <div className="flex items-center justify-center h-[calc(100vh-200px)]">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      <div className="h-full bg-[#121816] flex items-center justify-center">
+        <div className="stage-spinner" />
       </div>
     );
   }
 
-  if (!slide || !slideInfo) {
-    return (
-      <div className="text-center py-16">
-        <h2 className="text-xl font-medium text-gray-900">Slide not found</h2>
-        <Link to="/slides" className="btn-primary inline-block mt-4">
-          Back to Slides
-        </Link>
-      </div>
-    );
+  if (!slide) {
+    return <CenteredMessage title="找不到切片" body="这张玻片可能已删除。" />;
   }
 
   if (slide.status !== 'ready') {
     return (
-      <div className="text-center py-16">
-        <h2 className="text-xl font-medium text-gray-900">Slide not ready</h2>
-        <p className="text-gray-600 mt-2">This slide is still being processed</p>
-        <Link to="/slides" className="btn-primary inline-block mt-4">
-          Back to Slides
-        </Link>
-      </div>
+      <CenteredMessage
+        title={slide.status === 'error' ? '切片处理失败' : '切片还在处理'}
+        body={slide.error_message || (slide.status === 'error'
+          ? '请查看服务日志，或改用直读方式重新上传。'
+          : '金字塔生成完成后即可查看。')}
+      />
     );
   }
 
-  return (
-    <div className="h-[calc(100vh-100px)] flex flex-col">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-4">
-          <Link to="/slides" className="p-2 hover:bg-gray-100 rounded-lg">
-            <ArrowLeft className="w-5 h-5" />
-          </Link>
-          <div>
-            <h1 className="text-xl font-bold text-gray-900">{slide.name}</h1>
-            <p className="text-sm text-gray-500">{slide.course_name}</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowInfo(!showInfo)}
-            className={`p-2 rounded-lg transition-colors ${showInfo ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-100'}`}
-          >
-            <Info className="w-5 h-5" />
-          </button>
-        </div>
-      </div>
+  if (direct) {
+    return (
+      <WsiViewer
+        root="uploads"
+        filename={slide.filename}
+        backTo="/slides"
+        title={slide.name}
+        subtitle={[slide.course_name, '直读'].filter(Boolean).join(' · ')}
+      />
+    );
+  }
 
-      {/* Main Viewer Area */}
-      <div className="flex-1 flex gap-4 overflow-hidden">
-        {/* Viewer */}
-        <div className="flex-1 relative bg-gray-900 rounded-lg overflow-hidden">
-          <div ref={viewerRef} className="w-full h-full" />
+  if (!slideInfo) {
+    return <CenteredMessage title="切片信息缺失" body="无法读取金字塔尺寸。" />;
+  }
 
-          {/* Controls Overlay */}
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-white/90 backdrop-blur rounded-lg shadow-lg p-2">
-            <button onClick={handleZoomOut} className="p-2 hover:bg-gray-100 rounded" title="Zoom Out">
-              <ZoomOut className="w-5 h-5" />
-            </button>
-            <span className="text-sm font-medium min-w-[60px] text-center">
-              {Math.round(currentZoom * 100)}%
-            </span>
-            <button onClick={handleZoomIn} className="p-2 hover:bg-gray-100 rounded" title="Zoom In">
-              <ZoomIn className="w-5 h-5" />
-            </button>
-            <div className="w-px h-6 bg-gray-300 mx-1" />
-            <button onClick={handleReset} className="p-2 hover:bg-gray-100 rounded" title="Reset View">
-              <RotateCcw className="w-5 h-5" />
-            </button>
-            <button onClick={handleFullscreen} className="p-2 hover:bg-gray-100 rounded" title="Fullscreen">
-              {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
-            </button>
-          </div>
-
-          {/* Navigation Overlay */}
-          <div className="absolute top-1/2 left-4 -translate-y-1/2">
-            <button className="p-2 bg-white/90 backdrop-blur rounded-lg shadow hover:bg-white">
-              <span className="sr-only">Previous</span>
-              &#8249;
-            </button>
-          </div>
-          <div className="absolute top-1/2 right-4 -translate-y-1/2">
-            <button className="p-2 bg-white/90 backdrop-blur rounded-lg shadow hover:bg-white">
-              <span className="sr-only">Next</span>
-              &#8250;
-            </button>
-          </div>
-        </div>
-
-        {/* Info Sidebar */}
-        {showInfo && (
-          <div className="w-80 bg-white rounded-lg shadow p-6 overflow-y-auto">
-            <h3 className="font-semibold text-gray-900 mb-4">Slide Information</h3>
-
-            <div className="space-y-4">
-              <div>
-                <label className="text-sm text-gray-500">Name</label>
-                <p className="text-sm font-medium text-gray-900">{slide.name}</p>
-              </div>
-
-              {slide.description && (
-                <div>
-                  <label className="text-sm text-gray-500">Description</label>
-                  <p className="text-sm text-gray-900">{slide.description}</p>
-                </div>
-              )}
-
-              <div>
-                <label className="text-sm text-gray-500">Course</label>
-                <p className="text-sm font-medium text-gray-900">{slide.course_name || 'Not assigned'}</p>
-              </div>
-
-              <div className="border-t pt-4">
-                <h4 className="font-medium text-gray-900 mb-3">Technical Details</h4>
-
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div>
-                    <label className="text-gray-500">Dimensions</label>
-                    <p className="font-medium">{slide.width.toLocaleString()} × {slide.height.toLocaleString()} px</p>
-                  </div>
-                  <div>
-                    <label className="text-gray-500">Format</label>
-                    <p className="font-medium uppercase">{slide.original_format}</p>
-                  </div>
-                  <div>
-                    <label className="text-gray-500">Tile Size</label>
-                    <p className="font-medium">{slide.tile_size} px</p>
-                  </div>
-                  <div>
-                    <label className="text-gray-500">Zoom Levels</label>
-                    <p className="font-medium">{slide.max_level + 1}</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="border-t pt-4">
-                <label className="text-sm text-gray-500">Uploaded</label>
-                <p className="text-sm text-gray-900">
-                  {new Date(slide.created_at).toLocaleDateString()} by {slide.uploaded_by_name}
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Thumbnail Strip */}
-      <div className="mt-4 flex gap-2 overflow-x-auto pb-2">
-        <div className="flex-shrink-0 w-32 aspect-video bg-gray-100 rounded-lg overflow-hidden border-2 border-blue-500">
-          {slide.thumbnail_path && (
-            <img src={slide.thumbnail_path} alt="" className="w-full h-full object-cover" />
-          )}
-        </div>
-      </div>
-    </div>
-  );
+  return <PyramidViewer slide={slide} slideInfo={slideInfo} token={token} />;
 }

@@ -5,9 +5,11 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "dev": "concurrently -n api,web,tiles -c blue,green,magenta \"npm run server\" \"npm run client\" \"npm run tiles\"",
     "server": "nodemon server/index.js",
     "client": "cd client && npm start",
+    "tiles": "node scripts/tile-server.js",
+    "test:tiles": "node scripts/pytest.js",
     "build": "cd client && npm run build",
     "install-client": "cd client && npm install"
   },
