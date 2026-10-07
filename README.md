@@ -54,7 +54,7 @@ npm run server
 npm run client
 ```
 
-浏览器打开 http://localhost:3000 ，用 `teacher` / `teacher123` 登录，进入「直读库」。
+浏览器打开 http://localhost:3000 ，用 `teacher` / `teacher123` 登录，进入「数字切片库」。
 
 生产环境不要把 Flask 开发服务器暴露到公网。瓦片服务保持在本机，由 Express 校验登录后再转发：
 
@@ -68,13 +68,28 @@ kfbslide 没有官方的线程安全说明，所以只用一个 worker，同一�
 
 KFB 里的 **label（标签图）可能含有患者信息，服务端不提供这个接口，也不会把它写进元数据**。宏观图（macro）默认不显示，只有在信息面板里勾选「显示宏观图」才会请求。
 
+### 侧栏
+
+「数字切片库」列出 `slides/` 里可直接浏览的切片，「课程切片」是课程中上传的切片。侧栏底部可在「深色 / 浅色」之间切换，选择写入浏览器 `localStorage`（键 `sidebar-theme`），默认深色。浅色只改侧栏和页面纸色背景，查看器舞台仍是深色。
+
+### 截图
+
+查看器工具栏的「截图」导出当前视野的 OpenSeadragon 画布，不包含浏览器边框和信息面板。可选择是否叠上比例尺，下载 PNG 或 JPEG。文件名包含切片名和当前倍率。KFB（DeepZoom）和 SVS 共用这一按钮。
+
+### 临床信息
+
+数字切片库中的每张切片都可以附一份教学用临床说明，存在切片旁边的 `文件名.clinical.json`（例如 `slides/case.svs.clinical.json`）。登录用户可在查看器信息面板的「临床信息」中阅读；教师和管理员可以编辑并保存。这份内容和 KFB 标签图无关，标签图仍然不会被读取或展示。
+
+字段：病例/标题、性别、年龄、取材部位、临床诊断/印象、病理所见、备注、补充说明。
+
 ### 测试
 
 ```bash
 npm run test:tiles
+node --test server/wsi.clinical.test.js
 ```
 
-测试会下载 OpenSlide 的公开小图 `CMU-1-Small-Region.svs`（没有公开的 `.kfb` 样本）。KFB 分支用假的 kfbslide 对象检查分派、DeepZoom 瓦片，以及标签图不会被读取。
+测试会下载 OpenSlide 的公开小图 `CMU-1-Small-Region.svs`（没有公开的 `.kfb` 样本）。KFB 分支用假的 kfbslide 对象检查分派、DeepZoom 瓦片，以及标签图不会被读取。临床信息测试覆盖 sidecar 读写；Express 测试确认学生不能保存、教师的 JSON 会转发到瓦片服务。
 
 ## Features
 
@@ -217,6 +232,8 @@ DigitalSlideSystem/
 - `GET /api/wsi/r/:root/:filename.dzi`
 - `GET /api/wsi/r/:root/:filename_files/:level/:col_:row.jpeg`
 - `GET /api/wsi/r/:root/:filename/macro.jpg?explicit=1` - Macro only, and only when asked
+- `GET /api/wsi/r/:root/:filename/clinical` - Clinical notes (any logged-in user)
+- `PUT /api/wsi/r/:root/:filename/clinical` - Replace clinical notes (teacher/admin)
 
 `:root` is `library` (the `slides/` folder) or `uploads` (files uploaded for direct view). Label images are not served.
 

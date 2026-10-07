@@ -2,7 +2,7 @@ const express = require('express');
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -13,9 +13,30 @@ function tileOrigin() {
 // Logged-in users only. The Python process stays on localhost.
 router.use(authenticateToken);
 
+// Teachers and admins may edit clinical notes. The proxy below forwards the body.
+router.put(
+  '/r/:root/:filename/clinical',
+  requireRole('teacher', 'admin'),
+  (req, res, next) => {
+    const name = req.user && req.user.username ? String(req.user.username) : '';
+    req.headers['x-updated-by'] = name.slice(0, 200);
+    next();
+  }
+);
+
 router.use((req, res) => {
   const origin = tileOrigin();
   const transport = origin.protocol === 'https:' ? https : http;
+  const headers = { accept: req.headers.accept || '*/*' };
+  let payload = null;
+  if (req.method === 'PUT' || req.method === 'POST' || req.method === 'PATCH') {
+    payload = Buffer.from(JSON.stringify(req.body ?? {}));
+    headers['content-type'] = 'application/json; charset=utf-8';
+    headers['content-length'] = String(payload.length);
+    if (req.headers['x-updated-by']) {
+      headers['x-updated-by'] = String(req.headers['x-updated-by']).slice(0, 200);
+    }
+  }
   const upstream = transport.request(
     {
       protocol: origin.protocol,
@@ -23,7 +44,7 @@ router.use((req, res) => {
       port: origin.port,
       method: req.method,
       path: req.url,
-      headers: { accept: req.headers.accept || '*/*' },
+      headers,
       timeout: 120000,
     },
     (up) => {
@@ -47,7 +68,8 @@ router.use((req, res) => {
       hint: 'Start it with: python -m tile_server',
     });
   });
-  upstream.end();
+  if (payload) upstream.end(payload);
+  else upstream.end();
 });
 
 module.exports = router;

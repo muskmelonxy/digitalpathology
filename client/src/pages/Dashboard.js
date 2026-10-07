@@ -88,7 +88,7 @@ export default function Dashboard() {
         <div className="flex flex-wrap gap-4">
           <Link to="/library" className="btn-primary inline-flex items-center gap-2">
             <Image className="w-4 h-4" />
-            直读库 Library
+            数字切片库
           </Link>
           <Link to="/upload" className="btn-secondary inline-flex items-center gap-2">
             <Image className="w-4 h-4" />

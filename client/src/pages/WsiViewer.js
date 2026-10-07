@@ -4,6 +4,7 @@ import axios from 'axios';
 import OpenSeadragon from 'openseadragon';
 import { useAuth } from '../contexts/AuthContext';
 import ViewerChrome from '../components/ViewerChrome';
+import ClinicalPanel from '../components/ClinicalPanel';
 import {
   MAG_STOPS,
   chooseScaleBar,
@@ -285,12 +286,21 @@ export default function WsiViewer({
     <p className="meta-note">{metaError || '正在读取切片信息…'}</p>
   );
 
+  const details = (
+    <>
+      {info}
+      {filename && !metaError ? <ClinicalPanel root={root} filename={filename} /> : null}
+    </>
+  );
+
   return (
     <ViewerChrome
       title={displayTitle}
       subtitle={displaySubtitle}
       backTo={backTo}
-      backLabel={backTo === '/library' ? '玻片库' : '返回'}
+      backLabel={backTo === '/library' ? '数字切片库' : '返回'}
+      viewerRef={osdRef}
+      exportName={displayTitle}
       magnifications={objective ? MAG_STOPS : null}
       activeMag={nearestStop(magnification)}
       onMagnification={goToMagnification}
@@ -302,7 +312,7 @@ export default function WsiViewer({
       showInfo={showInfo}
       onToggleInfo={() => setShowInfo((value) => !value)}
       filmstrip={filmstrip}
-      info={info}
+      info={details}
       scaleBar={opened ? scaleBar : null}
       loading={!opened && !openError && !metaError}
       error={openError || metaError}

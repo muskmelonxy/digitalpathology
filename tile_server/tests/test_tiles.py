@@ -305,3 +305,122 @@ def test_public_svs_dzi_and_tiles(svs_dir):
     escaped = client.get("/r/library/..%2F..%2Fetc%2Fpasswd.dzi")
     assert escaped.status_code == 404
     assert client.get("/health").status_code == 200
+
+
+def test_clinical_sidecar_roundtrip_and_privacy(tmp_path):
+    library = tmp_path / "library"
+    library.mkdir()
+    slide = library / "case.svs"
+    slide.write_bytes(b"not-a-real-svs")
+    (library / "case.svs.clinical.json").write_text("not json", encoding="utf-8")
+    store = SlideStore({"library": library})
+    # A broken sidecar reads as empty instead of leaking a parser error.
+    broken = store.read_clinical("library", "case.svs")
+    assert broken["empty"] is True
+    assert broken["notes"] == ""
+    assert "label" not in broken
+
+    saved = store.write_clinical(
+        "library",
+        "case.svs",
+        {
+            "case_title": "教学病例 1",
+            "sex": "女",
+            "age": 54,
+            "site": "乳腺",
+            "clinical_diagnosis": "肿块",
+            "pathology_findings": "浸润性导管癌",
+            "remarks": "教学用",
+            "notes": "无患者标识",
+            "label": "must-not-be-stored",
+            "associated_image": "nope",
+        },
+        updated_by="teacher",
+    )
+    assert saved["case_title"] == "教学病例 1"
+    assert saved["age"] == "54"
+    assert saved["empty"] is False
+    assert saved["updated_by"] == "teacher"
+    assert "label" not in saved
+    sidecar = library / "case.svs.clinical.json"
+    on_disk = sidecar.read_text(encoding="utf-8")
+    assert "must-not-be-stored" not in on_disk
+    again = store.read_clinical("library", "case.svs")
+    assert again["notes"] == "无患者标识"
+    assert again["pathology_findings"] == "浸润性导管癌"
+
+    listing = store.list_slides("library")
+    names = [item["filename"] for item in listing]
+    assert names == ["case.svs"]
+    assert all(not name.endswith(".json") for name in names)
+
+    with pytest.raises(SlideNotFound):
+        store.write_clinical("library", "../outside.svs", {"notes": "x"})
+    with pytest.raises(ValueError, match="too long|exceeds"):
+        store.write_clinical("library", "case.svs", {"notes": "字" * 4001})
+
+    cleared = store.write_clinical(
+        "library",
+        "case.svs",
+        {key: "" for key in (
+            "case_title", "sex", "age", "site", "clinical_diagnosis",
+            "pathology_findings", "remarks", "notes",
+        )},
+    )
+    assert cleared["empty"] is True
+
+
+def test_clinical_http(tmp_path):
+    library = tmp_path / "slides"
+    library.mkdir()
+    (library / "CMU.svs").write_bytes(b"placeholder")
+    client = _client(library)
+
+    missing = client.get("/r/library/missing.svs/clinical")
+    assert missing.status_code == 404
+    assert missing.get_json()["error"] == "Slide not found"
+
+    empty = client.get("/r/library/CMU.svs/clinical")
+    assert empty.status_code == 200
+    body = empty.get_json()
+    assert body["empty"] is True
+    assert body["case_title"] == ""
+    assert "label" not in body
+
+    rejected = client.put(
+        "/r/library/CMU.svs/clinical",
+        data="not-json",
+        content_type="text/plain",
+    )
+    assert rejected.status_code == 400
+
+    saved = client.put(
+        "/r/library/CMU.svs/clinical",
+        json={
+            "case_title": "病例 A",
+            "sex": "男",
+            "age": "61",
+            "site": "肺",
+            "clinical_diagnosis": "占位",
+            "pathology_findings": "鳞癌",
+            "remarks": "教学",
+            "notes": "自由备注",
+            "label": "hidden",
+        },
+        headers={"X-Updated-By": "teacher"},
+    )
+    assert saved.status_code == 200
+    payload = saved.get_json()
+    assert payload["case_title"] == "病例 A"
+    assert payload["notes"] == "自由备注"
+    assert payload["updated_by"] == "teacher"
+    assert "label" not in payload
+
+    again = client.get("/r/library/CMU.svs/clinical")
+    assert again.status_code == 200
+    assert again.get_json()["site"] == "肺"
+    listed = client.get("/slides?root=library").get_json()
+    assert [item["filename"] for item in listed] == ["CMU.svs"]
+
+    outside = client.put("/r/library/..%2Fsecret.svs/clinical", json={"notes": "no"})
+    assert outside.status_code == 404

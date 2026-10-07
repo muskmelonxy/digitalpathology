@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowLeft,
+  Camera,
   Home,
   Info,
   Maximize,
@@ -9,6 +10,7 @@ import {
   Minus,
   Plus,
 } from 'lucide-react';
+import { exportViewport, snapshotFilename } from '../viewer/snapshot';
 
 export default function ViewerChrome({
   title,
@@ -28,6 +30,8 @@ export default function ViewerChrome({
   filmstrip = [],
   info,
   scaleBar,
+  viewerRef,
+  exportName,
   loading,
   loadingText = '正在打开切片',
   loadingHint = 'Opening slide',
@@ -35,13 +39,50 @@ export default function ViewerChrome({
   children,
 }) {
   const shellRef = React.useRef(null);
+  const snapshotRef = React.useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [snapshotOpen, setSnapshotOpen] = useState(false);
+  const [withScale, setWithScale] = useState(true);
+  const [snapshotError, setSnapshotError] = useState('');
 
   useEffect(() => {
     const onChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
     document.addEventListener('fullscreenchange', onChange);
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
+
+  useEffect(() => {
+    if (!snapshotOpen) return undefined;
+    const onPointer = (event) => {
+      if (!snapshotRef.current?.contains(event.target)) setSnapshotOpen(false);
+    };
+    const onKey = (event) => {
+      if (event.key === 'Escape') setSnapshotOpen(false);
+    };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [snapshotOpen]);
+
+  const downloadSnapshot = async (mime) => {
+    setSnapshotError('');
+    try {
+      const viewer = viewerRef?.current;
+      await exportViewport({
+        viewer,
+        includeScaleBar: Boolean(withScale && scaleBar),
+        scaleBar,
+        mime,
+        filename: snapshotFilename(exportName || title, readout, mime),
+      });
+      setSnapshotOpen(false);
+    } catch (err) {
+      setSnapshotError(err.message || '导出失败');
+    }
+  };
 
   const toggleFullscreen = () => {
     const node = shellRef.current;
@@ -101,6 +142,48 @@ export default function ViewerChrome({
           <button type="button" onClick={onZoomIn} title="放大 Zoom in">
             <Plus className="w-4 h-4" />
           </button>
+          {viewerRef ? (
+            <div className="snapshot-wrap" ref={snapshotRef}>
+              <button
+                type="button"
+                className="tool-label"
+                data-active={snapshotOpen}
+                onClick={() => {
+                  setSnapshotError('');
+                  setSnapshotOpen((open) => !open);
+                }}
+                title="截图 Snapshot"
+                aria-label="截图"
+                aria-expanded={snapshotOpen}
+              >
+                <Camera className="w-4 h-4" />
+                截图
+              </button>
+              {snapshotOpen && (
+                <div className="snapshot-menu" role="dialog" aria-label="导出当前视野">
+                  <p>导出当前视野</p>
+                  <label className={scaleBar ? '' : 'is-disabled'}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(withScale && scaleBar)}
+                      disabled={!scaleBar}
+                      onChange={(event) => setWithScale(event.target.checked)}
+                    />
+                    包含比例尺
+                  </label>
+                  <div className="snapshot-actions">
+                    <button type="button" onClick={() => downloadSnapshot('image/png')}>
+                      PNG
+                    </button>
+                    <button type="button" className="is-ghost" onClick={() => downloadSnapshot('image/jpeg')}>
+                      JPEG
+                    </button>
+                  </div>
+                  {snapshotError ? <p className="snapshot-error">{snapshotError}</p> : null}
+                </div>
+              )}
+            </div>
+          ) : null}
           <button
             type="button"
             data-active={showInfo}

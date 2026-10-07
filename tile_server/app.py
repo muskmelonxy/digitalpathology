@@ -42,6 +42,30 @@ def create_app(slide_dirs: dict[str, Path] | None = None) -> Flask:
         data = store.thumbnail(root, filename)
         return Response(data, mimetype="image/jpeg")
 
+    @app.get("/r/<root>/<filename>/clinical")
+    def read_clinical(root, filename):
+        response = jsonify(store.read_clinical(root, filename))
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+    @app.put("/r/<root>/<filename>/clinical")
+    def write_clinical(root, filename):
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify(error="Clinical info must be a JSON object"), 400
+        try:
+            saved = store.write_clinical(
+                root,
+                filename,
+                body,
+                updated_by=request.headers.get("X-Updated-By", ""),
+            )
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        response = jsonify(saved)
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
     @app.get("/r/<root>/<filename>/macro.jpg")
     def macro(root, filename):
         # Hidden unless the viewer explicitly asks. There is no label route.

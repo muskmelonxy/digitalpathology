@@ -13,6 +13,16 @@ import {
   Microscope,
 } from 'lucide-react';
 
+const THEME_KEY = 'sidebar-theme';
+
+function readTheme() {
+  try {
+    return window.localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark';
+  } catch (err) {
+    return 'dark';
+  }
+}
+
 const ROLE_LABELS = {
   teacher: '教师',
   student: '学生',
@@ -24,6 +34,15 @@ export default function Layout() {
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
+  const [theme, setTheme] = React.useState(readTheme);
+
+  React.useEffect(() => {
+    try {
+      window.localStorage.setItem(THEME_KEY, theme);
+    } catch (err) {
+      // Private mode can reject storage; the choice still applies this session.
+    }
+  }, [theme]);
 
   const handleLogout = () => {
     logout();
@@ -32,8 +51,8 @@ export default function Layout() {
 
   const navItems = [
     { path: '/', label: '总览', hint: 'Dashboard', icon: LayoutDashboard },
-    { path: '/library', label: '直读库', hint: 'Library', icon: Microscope },
-    { path: '/slides', label: '课程玻片', hint: 'Slides', icon: Image },
+    { path: '/library', label: '数字切片库', hint: 'Library', icon: Microscope },
+    { path: '/slides', label: '课程切片', hint: 'Course slides', icon: Image },
     { path: '/courses', label: '课程', hint: 'Courses', icon: BookOpen },
   ];
 
@@ -52,6 +71,25 @@ export default function Layout() {
     path === '/'
       ? location.pathname === '/'
       : location.pathname === path || location.pathname.startsWith(`${path}/`)
+  );
+
+  const ThemeToggle = () => (
+    <div className="theme-toggle" role="group" aria-label="侧栏主题">
+      <button
+        type="button"
+        data-active={theme === 'dark'}
+        onClick={() => setTheme('dark')}
+      >
+        深色
+      </button>
+      <button
+        type="button"
+        data-active={theme === 'light'}
+        onClick={() => setTheme('light')}
+      >
+        浅色
+      </button>
+    </div>
   );
 
   const NavLinks = ({ onNavigate }) => (
@@ -78,16 +116,16 @@ export default function Layout() {
   );
 
   return (
-    <div className="h-screen overflow-hidden flex bg-paper text-ink">
-      <aside className="hidden md:flex flex-col w-[248px] shrink-0 bg-[#12211f] text-[#e7efe9]">
+    <div className={`h-screen overflow-hidden flex bg-paper text-ink app-shell theme-${theme}`}>
+      <aside className={`sidebar theme-${theme} hidden md:flex flex-col w-[248px] shrink-0`}>
         <div className="px-5 pt-6 pb-5">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-[#1f6f68] flex items-center justify-center">
+            <div className="brand-mark w-10 h-10 rounded-2xl flex items-center justify-center">
               <Microscope className="w-5 h-5" />
             </div>
             <div>
               <p className="font-serif text-lg leading-none">Digital Slides</p>
-              <p className="text-[11px] tracking-[0.14em] text-[#9fb5ad] mt-1">数字玻片</p>
+              <p className="sidebar-muted text-[11px] tracking-[0.14em] mt-1">数字玻片</p>
             </div>
           </div>
         </div>
@@ -96,17 +134,18 @@ export default function Layout() {
           <NavLinks />
         </nav>
 
-        <div className="p-3 border-t border-white/10">
+        <div className="sidebar-foot p-3">
+          <ThemeToggle />
           <div className="flex items-center gap-3 px-3 py-2">
-            <div className="w-8 h-8 rounded-full bg-[#e7a15a] text-[#2a1608] flex items-center justify-center font-semibold">
+            <div className="user-badge w-8 h-8 rounded-full flex items-center justify-center font-semibold">
               {user?.username?.[0]?.toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate">{user?.username}</p>
-              <p className="text-xs text-[#9fb5ad]">{ROLE_LABELS[user?.role] || user?.role}</p>
+              <p className="sidebar-muted text-xs">{ROLE_LABELS[user?.role] || user?.role}</p>
             </div>
           </div>
-          <button type="button" onClick={handleLogout} className="nav-link w-full text-left text-[#f0c1b0]">
+          <button type="button" onClick={handleLogout} className="nav-link logout-link w-full text-left">
             <LogOut className="w-5 h-5" />
             <span>
               <strong>退出</strong>
@@ -117,7 +156,7 @@ export default function Layout() {
       </aside>
 
       <div className="flex-1 min-w-0 flex flex-col">
-        <div className="md:hidden flex items-center justify-between px-4 h-14 border-b border-stone-200 bg-[#12211f] text-[#e7efe9]">
+        <div className={`sidebar sidebar-bar theme-${theme} md:hidden flex items-center justify-between px-4 h-14`}>
           <p className="font-serif">数字玻片</p>
           <button
             type="button"
@@ -129,9 +168,10 @@ export default function Layout() {
           </button>
         </div>
         {mobileMenuOpen && (
-          <nav className="md:hidden bg-[#12211f] text-[#e7efe9] px-3 pb-3 space-y-1">
+          <nav className={`sidebar theme-${theme} md:hidden px-3 pb-3 space-y-1`}>
             <NavLinks onNavigate={() => setMobileMenuOpen(false)} />
-            <button type="button" onClick={handleLogout} className="nav-link w-full text-left">
+            <ThemeToggle />
+            <button type="button" onClick={handleLogout} className="nav-link logout-link w-full text-left">
               <LogOut className="w-5 h-5" />
               <span>
                 <strong>退出</strong>

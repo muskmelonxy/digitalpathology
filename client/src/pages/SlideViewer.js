@@ -7,7 +7,7 @@ import { useAuth } from '../contexts/AuthContext';
 import ViewerChrome from '../components/ViewerChrome';
 import WsiViewer from './WsiViewer';
 
-function CenteredMessage({ title, body, to = '/slides', action = '返回玻片' }) {
+function CenteredMessage({ title, body, to = '/slides', action = '返回课程切片' }) {
   return (
     <div className="h-full bg-paper flex items-center justify-center p-8">
       <div className="max-w-md text-center">
@@ -96,7 +96,9 @@ function PyramidViewer({ slide, slideInfo, token }) {
   return (
     <ViewerChrome
       title={slide.name}
-      subtitle={slide.course_name || '课程玻片'}
+      subtitle={slide.course_name || '课程切片'}
+      viewerRef={osdRef}
+      exportName={slide.name}
       backTo="/slides"
       readout={imageZoom ? `${imageZoom.toFixed(2)}×` : '—'}
       readoutHint="像素倍率"

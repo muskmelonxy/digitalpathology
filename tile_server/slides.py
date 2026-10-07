@@ -9,8 +9,10 @@ Label associated images are never read. They can carry patient identifiers.
 
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -43,6 +45,69 @@ JPEG_QUALITY = 80
 
 # Associated-image names that must never be decoded or returned.
 _PRIVATE_ASSOCIATED = {"label"}
+
+# Deliberate teaching metadata. This is not the KFB label image.
+CLINICAL_FIELDS = (
+    "case_title",
+    "sex",
+    "age",
+    "site",
+    "clinical_diagnosis",
+    "pathology_findings",
+    "remarks",
+    "notes",
+)
+CLINICAL_MAX_LENGTH = 4000
+
+
+def empty_clinical() -> dict:
+    data = {key: "" for key in CLINICAL_FIELDS}
+    data["empty"] = True
+    data["updated_at"] = None
+    data["updated_by"] = None
+    return data
+
+
+def normalize_clinical(payload, updated_by: str | None = None) -> dict:
+    """Keep only the known text fields. Drop anything else, including label."""
+    if not isinstance(payload, dict):
+        raise ValueError("Clinical info must be a JSON object")
+    cleaned = {}
+    for key in CLINICAL_FIELDS:
+        value = payload.get(key, "")
+        if value is None:
+            value = ""
+        elif isinstance(value, bool):
+            raise ValueError(f"{key} must be text")
+        elif isinstance(value, (int, float)):
+            value = str(value)
+        elif not isinstance(value, str):
+            raise ValueError(f"{key} must be text")
+        value = value.replace("\x00", "").strip()
+        if len(value) > CLINICAL_MAX_LENGTH:
+            raise ValueError(f"{key} exceeds {CLINICAL_MAX_LENGTH} characters")
+        cleaned[key] = value
+    who = (updated_by or "").replace("\x00", "").strip()[:200]
+    cleaned["empty"] = not any(cleaned.values())
+    cleaned["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cleaned["updated_by"] = who or None
+    return cleaned
+
+
+def _clinical_from_disk(raw: object) -> dict:
+    base = empty_clinical()
+    if not isinstance(raw, dict):
+        return base
+    for key in CLINICAL_FIELDS:
+        value = raw.get(key, "")
+        if isinstance(value, str):
+            base[key] = value
+    base["empty"] = not any(base[key] for key in CLINICAL_FIELDS)
+    updated_at = raw.get("updated_at")
+    updated_by = raw.get("updated_by")
+    base["updated_at"] = updated_at if isinstance(updated_at, str) else None
+    base["updated_by"] = updated_by if isinstance(updated_by, str) else None
+    return base
 
 
 class SlideNotFound(Exception):
@@ -332,6 +397,29 @@ class SlideStore:
             image = handle.slide.get_thumbnail((size, size))
             data = _jpeg_bytes(image)
         self._thumbnails[cache_key] = data
+        return data
+
+    def clinical_path(self, root: str, filename: str) -> Path:
+        path = self.resolve(root, filename)
+        return path.with_name(path.name + ".clinical.json")
+
+    def read_clinical(self, root: str, filename: str) -> dict:
+        sidecar = self.clinical_path(root, filename)
+        if not sidecar.is_file():
+            return empty_clinical()
+        try:
+            raw = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return empty_clinical()
+        return _clinical_from_disk(raw)
+
+    def write_clinical(self, root: str, filename: str, payload, updated_by: str | None = None) -> dict:
+        sidecar = self.clinical_path(root, filename)
+        data = normalize_clinical(payload, updated_by)
+        encoded = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+        temporary = sidecar.with_name(sidecar.name + ".tmp")
+        temporary.write_text(encoded, encoding="utf-8")
+        temporary.replace(sidecar)
         return data
 
     def macro_jpeg(self, root: str, filename: str) -> bytes:
