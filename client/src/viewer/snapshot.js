@@ -1,12 +1,18 @@
 /** Capture the current OpenSeadragon viewport, not the page chrome. */
 
+function safeSlideName(slideName) {
+  const blocked = new Set(['\\', '/', ':', '*', '?', '"', '<', '>', '|']);
+  let safe = '';
+  for (const ch of String(slideName || '')) {
+    const code = ch.charCodeAt(0);
+    if (code < 32 || blocked.has(ch)) continue;
+    safe += /\s/.test(ch) ? '_' : ch;
+  }
+  return safe.replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 80) || 'slide';
+}
+
 export function snapshotFilename(slideName, readout, mime) {
-  const safe = String(slideName || 'slide')
-    .replace(/[\\/:*?"<>|\u0000]+/g, '')
-    .replace(/\s+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_|_$/g, '')
-    .slice(0, 80) || 'slide';
+  const safe = safeSlideName(slideName);
   const zoom = String(readout || '')
     .replace(/×/g, 'x')
     .replace(/[^\w.]+/g, '')

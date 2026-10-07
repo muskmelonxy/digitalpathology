@@ -51,11 +51,11 @@ export default function ClinicalPanel({ root, filename }) {
   const save = async () => {
     setSaving(true);
     try {
-      await axios.put(
+      const response = await axios.put(
         `/api/wsi/r/${encodeURIComponent(root)}/${encodeURIComponent(filename)}/clinical`,
         draft
       );
-      await queryClient.invalidateQueries(['wsi-clinical', root, filename]);
+      queryClient.setQueryData(['wsi-clinical', root, filename], response.data);
       toast.success('临床信息已保存');
       setEditing(false);
     } catch (error) {
